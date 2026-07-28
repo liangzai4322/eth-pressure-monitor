@@ -579,7 +579,7 @@
         const c=data.collector, when=c.last_poll?new Date(c.last_poll).toLocaleString("zh-CN",{hour12:false}):"等待首次轮询";
         $("collectorNotice").textContent=c.last_error
           ? `自动采集最近一次出现异常：${c.last_error}；手动补录仍可正常使用。`
-          : `自动采集运行中 · 每 60 秒检查 · 最近轮询 ${when} · 本次读取 ${c.events_seen||0} 条。这里仍可手动补录。`;
+          : `复用原监控产出 · 原服务每 60 秒采集 · 最近读取 ${when} · 本次新增日志 ${c.events_seen||0} 条。这里仍可手动补录。`;
         $("collectorNotice").className=`notice ${c.last_error?"warn":"info"}`;
       } catch {}
     }
