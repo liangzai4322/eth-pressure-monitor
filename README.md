@@ -16,6 +16,8 @@
 - HTTPS 服务器状态同步与乐观锁冲突检测
 - DeepSeek 服务端代理解析
 - AI 识别结果编辑、复核和确认执行
+- 复用原监控脚本的交易所 ETH 转入自动采集
+- 自动采集事件 ID 幂等去重，同时保留手动补录
 - 响应式手机和桌面界面
 
 ## 本地运行
@@ -34,5 +36,9 @@ API 代码位于 `server/api_server.py`，提供：
 - `GET /api/state`
 - `PUT /api/state`
 - `POST /api/parse`
+- `POST /api/inflow`
+- `GET/POST /api/collector`
 
 状态写入采用递增 revision。客户端携带旧 revision 写入时，服务器返回 `409`，避免不同设备静默覆盖数据。API Key、同步码和密码不写入 JSONL。
+
+`eth-monitor-collector.service` 每分钟读取一次数据源。首次启动只建立事件 ID 基线，后续新增的 ETH 交易所转入会调用 `/api/inflow` 自动累计；同一事件 ID 再次出现时按重复事件忽略。
