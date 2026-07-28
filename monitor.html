@@ -148,6 +148,14 @@
     .op-card b { display: block; font-size: 12px; }
     .op-card small { color: var(--muted); font-size: 10px; }
     .op-value { font: 700 13px Bahnschrift; white-space: nowrap; }
+    .op-editor { display: flex; align-items: center; justify-content: end; gap: 6px; flex-wrap: wrap; }
+    .op-editor input, .op-editor select { width: 112px; padding: 8px 9px; border-radius: 9px; font: 700 12px Bahnschrift; }
+    .op-editor input[type="time"] { width: 106px; }
+    .op-unit { color: var(--muted); font-size: 10px; }
+    .sync-badge { border: 1px solid var(--line); border-radius: 999px; padding: 8px 11px; background: white; color: var(--muted); font: 700 10px Consolas, monospace; }
+    .sync-badge.online { color: #277a73; border-color: #9fddd8; background: var(--cyan-soft); }
+    .sync-badge.busy { color: #655ab5; border-color: #c9c5f1; background: var(--violet-soft); }
+    .sync-badge.error { color: #a44138; border-color: #f0b0a9; background: var(--coral-soft); }
     .ambiguity { margin-top: 9px; padding: 10px 12px; border-radius: 11px; color: #925028; background: #fff0d9; font-size: 11px; }
     .preview-actions { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 12px; }
     .confirm-btn { border: 0; border-radius: 11px; padding: 11px; color: white; background: var(--ink); font-weight: 700; }
@@ -273,6 +281,7 @@
         <div><h1>ETH 转入压力监控台</h1><p>TRANSFER PRESSURE MONITOR · 手动数据模型</p></div>
       </div>
       <div class="top-actions">
+        <span class="sync-badge" id="syncStatus">仅本机</span>
         <span class="date-chip" id="todayChip"></span>
         <button class="ghost-btn" id="openInit">每日初始化</button>
       </div>
@@ -398,6 +407,9 @@
         <article class="panel">
           <div class="panel-head"><div><h3>模型设置</h3><p>修改也会写入日志并保留痕迹</p></div></div>
           <form id="settingsForm" class="settings-grid">
+            <div class="setting"><div><label for="syncApiUrl">同步 API</label><p>服务器统一保存状态和追加日志</p></div><input id="syncApiUrl" inputmode="url" placeholder="https://…/api"></div>
+            <div class="setting"><div><label for="syncToken">多端同步码</label><p>各设备填写同一同步码，不进入日志</p></div><input id="syncToken" type="password" autocomplete="off" placeholder="粘贴同步码"></div>
+            <button class="mini-btn" type="button" id="syncNow">立即从服务器同步</button>
             <div class="setting"><div><label for="deepseekKey">DeepSeek API Key</label><p>仅保存在当前浏览器，不进入日志和 GitHub</p></div><input id="deepseekKey" type="password" autocomplete="off" placeholder="sk-..."></div>
             <div class="setting"><div><label for="deepseekModel">解析模型</label><p>Flash 速度更快，适合短指令抽取</p></div><select id="deepseekModel"><option value="deepseek-v4-flash">V4 Flash</option><option value="deepseek-v4-pro">V4 Pro</option></select></div>
             <div class="setting"><div><label for="kInput">当前 k 值</label><p>默认 2.7，用于压力与消耗量换算</p></div><input id="kInput" type="number" min=".1" max="20" step=".1"></div>
@@ -435,6 +447,11 @@
     const STORE = "app";
     const STATE_KEY = "state";
     const DEEPSEEK_KEY = "eth-monitor-deepseek-key";
+    const SYNC_API_KEY = "eth-monitor-sync-api";
+    const SYNC_TOKEN_KEY = "eth-monitor-sync-token";
+    const SYNC_REVISION_KEY = "eth-monitor-sync-revision";
+    const DEVICE_ID_KEY = "eth-monitor-device-id";
+    const DEFAULT_SYNC_API = "https://156.227.237.4.sslip.io/api";
     const $ = (id) => document.getElementById(id);
     const clone = (value) => JSON.parse(JSON.stringify(value));
     const localDate = (date = new Date()) => {
@@ -473,6 +490,9 @@
     let state = initialState();
     let db;
     let pendingPlan = null;
+    let syncPushTimer = null;
+    let localDirty = false;
+    let syncBusy = false;
 
     function openDB() {
       return new Promise((resolve, reject) => {
@@ -496,9 +516,85 @@
         req.onerror = () => reject(req.error);
       });
     }
-    async function save() {
+    async function save(options={sync:true}) {
       try { await dbSet(STATE_KEY, state); }
       catch { localStorage.setItem(DB_NAME, JSON.stringify(state)); }
+      if(options.sync) {
+        localDirty=true;
+        clearTimeout(syncPushTimer);
+        syncPushTimer=setTimeout(syncPush,500);
+      }
+    }
+    function syncConfig() {
+      return {
+        api:(localStorage.getItem(SYNC_API_KEY)||DEFAULT_SYNC_API).replace(/\/+$/,""),
+        token:localStorage.getItem(SYNC_TOKEN_KEY)||"",
+        device:localStorage.getItem(DEVICE_ID_KEY)||""
+      };
+    }
+    function setSyncStatus(text,tone="") {
+      const el=$("syncStatus"); if(!el)return;
+      el.textContent=text; el.className=`sync-badge ${tone}`.trim();
+    }
+    async function syncRequest(path,options={}) {
+      const cfg=syncConfig();
+      if(!cfg.token) throw new Error("请先填写多端同步码");
+      const response=await fetch(`${cfg.api}${path}`,{
+        ...options,
+        headers:{"Content-Type":"application/json","Authorization":`Bearer ${cfg.token}`,...(options.headers||{})}
+      });
+      const data=await response.json().catch(()=>({}));
+      return {response,data};
+    }
+    async function syncPull(silent=false) {
+      const cfg=syncConfig();
+      if(!cfg.token||syncBusy||localDirty) return false;
+      syncBusy=true; setSyncStatus("同步中","busy");
+      try {
+        const {response,data}=await syncRequest("/state");
+        if(!response.ok) throw new Error(response.status===401?"同步码校验失败":`服务器响应 ${response.status}`);
+        if(data.state) {
+          state={...initialState(),...data.state,undo:null};
+          rollDay();
+          localStorage.setItem(SYNC_REVISION_KEY,String(data.revision||0));
+          await save({sync:false});
+          render();
+        }
+        setSyncStatus(`云端 R${data.revision||0}`,"online");
+        if(!silent)toast("已同步服务器最新状态");
+        return true;
+      } catch(err) {
+        setSyncStatus("同步异常","error");
+        if(!silent)toast(err.message);
+        return false;
+      } finally { syncBusy=false; }
+    }
+    async function syncPush() {
+      const cfg=syncConfig();
+      if(!cfg.token||syncBusy||!localDirty){if(!cfg.token)setSyncStatus("仅本机");return false;}
+      syncBusy=true; setSyncStatus("上传中","busy");
+      try {
+        const baseRevision=num(localStorage.getItem(SYNC_REVISION_KEY));
+        const {response,data}=await syncRequest("/state",{
+          method:"PUT",
+          body:JSON.stringify({base_revision:baseRevision,device_id:cfg.device,state:{...clone(state),undo:null}})
+        });
+        if(response.status===409) {
+          state={...initialState(),...data.state,undo:null};
+          localStorage.setItem(SYNC_REVISION_KEY,String(data.revision||0));
+          localDirty=false;
+          await save({sync:false}); render();
+          setSyncStatus(`云端 R${data.revision||0}`,"online");
+          toast("检测到其他设备的新数据，已采用服务器状态；请重新提交刚才的操作");
+          return false;
+        }
+        if(!response.ok) throw new Error(response.status===401?"同步码校验失败":`上传失败 ${response.status}`);
+        localStorage.setItem(SYNC_REVISION_KEY,String(data.revision||0));
+        localDirty=false; setSyncStatus(`云端 R${data.revision||0}`,"online");
+        return true;
+      } catch(err) {
+        setSyncStatus("待重试","error"); toast(err.message); return false;
+      } finally { syncBusy=false; }
     }
     function ensureDaily(date = localDate()) {
       if (!state.daily[date]) state.daily[date] = { newTransfers:0, realizedPoints:0, high:0, openingCarry:state.total, transfers:[], touched:true };
@@ -642,6 +738,20 @@
     async function parseWithDeepSeek(text) {
       const key=localStorage.getItem(DEEPSEEK_KEY);
       if(!key) return {...localNaturalParse(text),parser:"本地规则",fallback_reason:"尚未配置 DeepSeek API Key"};
+      const cfg=syncConfig();
+      if(cfg.token) {
+        const {response,data}=await syncRequest("/parse",{
+          method:"POST",
+          headers:{"X-DeepSeek-Key":key},
+          body:JSON.stringify({
+            text:`当前日期：${localDate()}，昨天日期：${yesterday()}。请把以下内容解析为 json：\n${text}`,
+            system_prompt:PARSER_PROMPT,
+            model:state.deepseekModel||"deepseek-v4-flash"
+          })
+        });
+        if(!response.ok) throw new Error(data.detail||data.error||`智能解析失败 ${response.status}`);
+        return {...data.result,parser:"DeepSeek · 服务器"};
+      }
       const response=await fetch("https://api.deepseek.com/chat/completions",{
         method:"POST",
         headers:{"Content-Type":"application/json","Authorization":`Bearer ${key}`},
@@ -668,7 +778,7 @@
       const ambiguities=Array.isArray(raw.ambiguities)?raw.ambiguities.map(String):[];
       let operations=(Array.isArray(raw.operations)?raw.operations:[]).filter(o=>allowed.has(o.type)).map(o=>({
         type:o.type,
-        date_ref:["today","yesterday"].includes(o.date_ref)||/^\d{4}-\d{2}-\d{2}$/.test(o.date_ref||"")?o.date_ref:"today",
+        date_ref:o.date_ref===localDate()?"today":o.date_ref===yesterday()?"yesterday":(["today","yesterday"].includes(o.date_ref)||/^\d{4}-\d{2}-\d{2}$/.test(o.date_ref||"")?o.date_ref:"today"),
         amount_eth:o.amount_eth==null?null:num(o.amount_eth),
         points:o.points==null?null:num(o.points),
         price:o.price==null?null:num(o.price),
@@ -703,18 +813,27 @@
       if(op.type==="set_k") return {name:"修改 k 值",value:op.k};
       return {name:`${date}未兑现`,value:"全部顺延"};
     }
+    function operationEditor(op,index) {
+      const date=`<select data-op="${index}" data-field="date_ref" aria-label="日期"><option value="today" ${op.date_ref==="today"?"selected":""}>今日</option><option value="yesterday" ${op.date_ref==="yesterday"?"selected":""}>昨日</option></select>`;
+      if(op.type==="add_transfer") return `${date}<input data-op="${index}" data-field="amount_eth" inputmode="decimal" value="${op.amount_eth??""}" aria-label="转入数量"><span class="op-unit">ETH</span><input data-op="${index}" data-field="time" type="time" value="${op.time||""}" aria-label="时间">`;
+      if(op.type==="realize_points") return `${date}<input data-op="${index}" data-field="points" inputmode="decimal" value="${op.points??""}" aria-label="兑现点数"><span class="op-unit">点</span>`;
+      if(op.type==="set_high") return `${date}<input data-op="${index}" data-field="price" inputmode="decimal" value="${op.price??""}" aria-label="高点价格"><span class="op-unit">高点</span>`;
+      if(op.type==="set_k") return `<input data-op="${index}" data-field="k" inputmode="decimal" value="${op.k??""}" aria-label="k值"><span class="op-unit">k</span>`;
+      return date;
+    }
     function renderPlan(plan) {
       pendingPlan=plan;
       $("parsePreview").classList.remove("hidden");
       $("parseSummary").textContent=`${plan.summary} · ${plan.parser}`;
       $("parseConfidence").textContent=`CONFIDENCE ${round(plan.confidence*100)}%`;
-      $("operationList").innerHTML=plan.operations.length?plan.operations.map((op,i)=>{const d=operationDescription(op);return `<div class="op-card"><span class="op-index">${String(i+1).padStart(2,"0")}</span><div><b>${escapeHtml(d.name)}</b><small>${escapeHtml(op.evidence||"结构化识别")}</small></div><span class="op-value">${escapeHtml(d.value)}</span></div>`;}).join(""):`<div class="empty">没有可执行操作</div>`;
+      $("operationList").innerHTML=plan.operations.length?plan.operations.map((op,i)=>{const d=operationDescription(op);return `<div class="op-card"><span class="op-index">${String(i+1).padStart(2,"0")}</span><div><b>${escapeHtml(d.name)}</b><small>${escapeHtml(op.evidence||"结构化识别")}</small></div><div class="op-editor">${operationEditor(op,i)}</div></div>`;}).join(""):`<div class="empty">没有可执行操作</div>`;
       const notes=[...(plan.ambiguities||[])]; if(plan.fallback_reason)notes.push(`${plan.fallback_reason}，本次使用本地口语规则解析。`);
       $("ambiguityList").innerHTML=notes.map(x=>`<div class="ambiguity">⚠️ ${escapeHtml(x)}</div>`).join("");
       $("confirmOperations").disabled=!plan.operations.length;
     }
     async function executePlan() {
       if(!pendingPlan?.operations.length)return;
+      pendingPlan=normalizePlan(pendingPlan);
       const realizes=pendingPlan.operations.filter(o=>o.type==="realize_points");
       if(realizes.length&&state.total<=0) return toast("当前未兑现转入为 0，请先登记转入或调整描述");
       prepareUndo();
@@ -722,7 +841,7 @@
         for(const op of pendingPlan.operations) {
           const note=`自然语言识别 · ${op.date_ref} · ${op.evidence}`;
           if(op.type==="realize_points") await addRealized(op.points,op.time||"",note,{skipUndo:true});
-          else if(op.type==="set_high"&&op.date_ref==="today") await updateHigh(op.price,{skipUndo:true});
+          else if(op.type==="set_high"&&(op.date_ref==="today"||op.date_ref===localDate())) await updateHigh(op.price,{skipUndo:true});
           else if(op.type==="add_transfer") await addTransfer(op.amount_eth,op.time||"",note,{skipUndo:true});
           else if(op.type==="set_k"){state.k=op.k;}
         }
@@ -852,6 +971,8 @@
       $("kInput").value = state.k; $("avgWindow").value = String(state.avgWindow);
       $("deepseekModel").value=state.deepseekModel||"deepseek-v4-flash";
       $("deepseekKey").value=localStorage.getItem(DEEPSEEK_KEY)||"";
+      $("syncApiUrl").value=localStorage.getItem(SYNC_API_KEY)||DEFAULT_SYNC_API;
+      $("syncToken").value=localStorage.getItem(SYNC_TOKEN_KEY)||"";
       $("aiStatus").textContent=localStorage.getItem(DEEPSEEK_KEY)?"◆ DEEPSEEK CONNECTED":"◇ LOCAL PARSER";
       $("undoBtn").disabled = !state.undo;
     }
@@ -904,11 +1025,14 @@
       $("transferPane").addEventListener("submit",async e=>{e.preventDefault();try{await addTransfer($("transferAmount").value,$("transferTime").value,$("transferNote").value);e.target.reset();toast("转入已登记");}catch(err){toast(err.message);}});
       $("realizedPane").addEventListener("submit",async e=>{e.preventDefault();try{await addRealized($("realizedPoints").value,$("realizedTime").value,$("realizedNote").value);e.target.reset();toast("兑现已登记");}catch(err){toast(err.message);}});
       $("highPane").addEventListener("submit",async e=>{e.preventDefault();try{await updateHigh($("highPrice").value);e.target.reset();toast("高点已更新");}catch(err){toast(err.message);}});
-      $("settingsForm").addEventListener("submit",async e=>{e.preventDefault();const k=num($("kInput").value),w=num($("avgWindow").value);if(k<=0)return toast("k 值需要大于 0");prepareUndo();const before=state.k;state.k=k;state.avgWindow=w;state.deepseekModel=$("deepseekModel").value;const apiKey=$("deepseekKey").value.trim();if(apiKey)localStorage.setItem(DEEPSEEK_KEY,apiKey);else localStorage.removeItem(DEEPSEEK_KEY);setResult(`⚙️ 模型设置已更新\n\nk 值：${before} → ${k}\n近期日均周期：最近 ${w} 天\n智能解析：${apiKey?state.deepseekModel+" 已连接":"本地规则模式"}\n\n🔻 当前剩余砸盘力度：约 ${fmt(pressurePoints())} 点`);addLog("settings",{amount:0,realized_points:0,consumed_eth:0,k_before:before,k_after:k},"模型参数更新",`k ${before} → ${k}`);await save();render();toast("模型设置已保存");});
+      $("settingsForm").addEventListener("submit",async e=>{e.preventDefault();const k=num($("kInput").value),w=num($("avgWindow").value);if(k<=0)return toast("k 值需要大于 0");const oldSyncToken=localStorage.getItem(SYNC_TOKEN_KEY)||"";const syncApi=$("syncApiUrl").value.trim().replace(/\/+$/,"")||DEFAULT_SYNC_API;const syncToken=$("syncToken").value.trim();localStorage.setItem(SYNC_API_KEY,syncApi);if(syncToken)localStorage.setItem(SYNC_TOKEN_KEY,syncToken);else localStorage.removeItem(SYNC_TOKEN_KEY);prepareUndo();const before=state.k;state.k=k;state.avgWindow=w;state.deepseekModel=$("deepseekModel").value;const apiKey=$("deepseekKey").value.trim();if(apiKey)localStorage.setItem(DEEPSEEK_KEY,apiKey);else localStorage.removeItem(DEEPSEEK_KEY);setResult(`⚙️ 模型设置已更新\n\nk 值：${before} → ${k}\n近期日均周期：最近 ${w} 天\n智能解析：${apiKey?state.deepseekModel+" 已连接":"本地规则模式"}\n多端同步：${syncToken?"服务器模式":"仅本机"}\n\n🔻 当前剩余砸盘力度：约 ${fmt(pressurePoints())} 点`);addLog("settings",{amount:0,realized_points:0,consumed_eth:0,k_before:before,k_after:k},"模型参数更新",`k ${before} → ${k}`);await save({sync:false});render();if(syncToken&&syncToken!==oldSyncToken){localDirty=false;await syncPull(false);}else if(syncToken){localDirty=true;await syncPush();}toast("模型设置已保存");});
       document.querySelectorAll(".example-chip").forEach(btn=>btn.addEventListener("click",()=>{$("naturalInput").value=btn.dataset.example;$("naturalInput").focus();}));
       $("parseNatural").addEventListener("click",async()=>{const text=$("naturalInput").value.trim();if(!text)return toast("请先输入一句描述");const btn=$("parseNatural");btn.disabled=true;btn.textContent="正在理解…";try{let raw;try{raw=await parseWithDeepSeek(text);}catch(err){raw={...localNaturalParse(text),parser:"本地规则",fallback_reason:err.message};}renderPlan(normalizePlan(raw));}catch(err){toast(`解析失败：${err.message}`);}finally{btn.disabled=false;btn.textContent="智能解析";}});
       $("confirmOperations").addEventListener("click",executePlan);
       $("cancelOperations").addEventListener("click",()=>{pendingPlan=null;$("parsePreview").classList.add("hidden");});
+      $("operationList").addEventListener("input",e=>{const index=Number(e.target.dataset.op),field=e.target.dataset.field;if(!pendingPlan||!Number.isInteger(index)||!field)return;pendingPlan.operations[index][field]=field==="time"||field==="date_ref"?e.target.value:num(e.target.value);if(field==="points"){pendingPlan.operations[index].source_high=null;pendingPlan.operations[index].source_low=null;}});
+      $("operationList").addEventListener("change",e=>e.target.dispatchEvent(new Event("input",{bubbles:true})));
+      $("syncNow").addEventListener("click",async()=>{const api=$("syncApiUrl").value.trim().replace(/\/+$/,"")||DEFAULT_SYNC_API,token=$("syncToken").value.trim();localStorage.setItem(SYNC_API_KEY,api);if(token)localStorage.setItem(SYNC_TOKEN_KEY,token);localDirty=false;await syncPull(false);});
       $("openInit").addEventListener("click",()=>$("initDialog").showModal());
       $("initLater").addEventListener("click",()=>$("initDialog").close());
       $("initNoRealized").addEventListener("change",e=>{$("initRealized").disabled=e.target.checked;if(e.target.checked)$("initRealized").value="";});
@@ -922,7 +1046,11 @@
     async function start() {
       try { await openDB(); const stored=await dbGet(STATE_KEY); if(stored) state={...initialState(),...stored}; }
       catch { const stored=localStorage.getItem(DB_NAME); if(stored) state={...initialState(),...JSON.parse(stored)}; }
-      rollDay(); wire(); await save(); render();
+      if(!localStorage.getItem(DEVICE_ID_KEY))localStorage.setItem(DEVICE_ID_KEY,uid());
+      rollDay(); wire(); await save({sync:false}); render();
+      if(syncConfig().token){localDirty=false;await syncPull(true);}
+      setInterval(()=>{if(document.visibilityState==="visible")syncPull(true);},30000);
+      document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")syncPull(true);});
       if (!state.initializedDates.includes(localDate())) setTimeout(()=>$("initDialog").showModal(),350);
     }
     start();
