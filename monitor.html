@@ -665,7 +665,8 @@
     }
     function normalizePlan(raw) {
       const allowed=new Set(["add_transfer","realize_points","set_high","set_k","no_realization"]);
-      const operations=(Array.isArray(raw.operations)?raw.operations:[]).filter(o=>allowed.has(o.type)).map(o=>({
+      const ambiguities=Array.isArray(raw.ambiguities)?raw.ambiguities.map(String):[];
+      let operations=(Array.isArray(raw.operations)?raw.operations:[]).filter(o=>allowed.has(o.type)).map(o=>({
         type:o.type,
         date_ref:["today","yesterday"].includes(o.date_ref)||/^\d{4}-\d{2}-\d{2}$/.test(o.date_ref||"")?o.date_ref:"today",
         amount_eth:o.amount_eth==null?null:num(o.amount_eth),
@@ -683,7 +684,16 @@
         if(o.type==="set_k") return o.k>0&&o.k<=20;
         return true;
       });
-      return {version:"1.0",summary:String(raw.summary||`识别到 ${operations.length} 项操作`),confidence:Math.max(0,Math.min(1,Number(raw.confidence)||0)),needs_confirmation:true,operations,ambiguities:Array.isArray(raw.ambiguities)?raw.ambiguities.map(String):[],parser:raw.parser||"DeepSeek",fallback_reason:raw.fallback_reason||""};
+      operations.forEach(o=>{
+        if(o.type==="realize_points"&&o.source_high>o.source_low) {
+          const verified=o.source_high-o.source_low;
+          if(Math.abs(verified-o.points)>.5) ambiguities.push(`模型给出的 ${fmt(o.points)} 点已按高低差复核为 ${fmt(verified)} 点。`);
+          o.points=verified;
+        }
+      });
+      const seen=new Set();
+      operations=operations.filter(o=>{const key=[o.type,o.date_ref,o.amount_eth,o.points,o.price,o.k,o.time].join("|");if(seen.has(key))return false;seen.add(key);return true;});
+      return {version:"1.0",summary:String(raw.summary||`识别到 ${operations.length} 项操作`),confidence:Math.max(0,Math.min(1,Number(raw.confidence)||0)),needs_confirmation:true,operations,ambiguities,parser:raw.parser||"DeepSeek",fallback_reason:raw.fallback_reason||""};
     }
     function operationDescription(op) {
       const date=op.date_ref==="yesterday"?"昨日":op.date_ref==="today"?"今日":op.date_ref;
@@ -810,7 +820,7 @@
       return { level:"节奏正常", text:`今日新增 ${fmt(todayAmount)} ETH，处于近期日均的正常区间。`, tone:"neutral" };
     }
     function actionLabel(action) {
-      return ({transfer:"ETH 转入",realized:"兑现扣减",high_update:"高点更新",settings:"模型设置",day_init:"每日初始化",undo:"撤销操作",restore:"数据恢复"})[action] || action;
+      return ({transfer:"ETH 转入",realized:"兑现扣减",high_update:"高点更新",settings:"模型设置",day_init:"每日初始化",undo:"撤销操作",restore:"数据恢复",natural_language:"口语指令"})[action] || action;
     }
 
     function render() {
