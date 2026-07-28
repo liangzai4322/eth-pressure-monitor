@@ -7,12 +7,15 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(os.environ.get("ETH_MONITOR_DATA_DIR", "/var/lib/eth-monitor-api"))
 STATE_FILE = ROOT / "state.json"
 LOG_FILE = ROOT / "ETH_monitor_log.jsonl"
+COLLECTOR_STATUS_FILE = ROOT / "collector-status.json"
 SYNC_TOKEN = os.environ["ETH_MONITOR_SYNC_TOKEN"]
 DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 ALLOWED_ORIGINS = {
@@ -126,6 +129,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.rstrip("/") == "/health":
             return self.json_response(200, {"ok": True, "service": "eth-monitor-api", "time": int(time.time())})
+        if self.path.rstrip("/") == "/api/collector":
+            if not self.authorized():
+                return self.json_response(401, {"ok": False, "error": "unauthorized"})
+            status = {}
+            if COLLECTOR_STATUS_FILE.exists():
+                with COLLECTOR_STATUS_FILE.open("r", encoding="utf-8") as handle:
+                    status = json.load(handle)
+            return self.json_response(200, {"ok": True, "collector": status})
         if self.path.rstrip("/") != "/api/state":
             return self.json_response(404, {"ok": False, "error": "not_found"})
         if not self.authorized():
@@ -161,10 +172,28 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_response(200, {"ok": True, **envelope})
 
     def do_POST(self):
-        if self.path.rstrip("/") != "/api/parse":
+        route = self.path.rstrip("/")
+        if route not in {"/api/parse", "/api/inflow", "/api/collector"}:
             return self.json_response(404, {"ok": False, "error": "not_found"})
         if not self.authorized():
             return self.json_response(401, {"ok": False, "error": "unauthorized"})
+        if route == "/api/inflow":
+            return self.handle_inflow()
+        if route == "/api/collector":
+            try:
+                payload = self.body_json()
+                status = {
+                    "last_poll": str(payload.get("last_poll", ""))[:40],
+                    "events_seen": int(payload.get("events_seen", 0)),
+                    "eligible_events": int(payload.get("eligible_events", 0)),
+                    "source": str(payload.get("source", ""))[:500],
+                    "last_error": str(payload.get("last_error", ""))[:1000],
+                }
+                with LOCK:
+                    atomic_json_write(COLLECTOR_STATUS_FILE, status)
+                return self.json_response(200, {"ok": True})
+            except Exception as exc:
+                return self.json_response(400, {"ok": False, "error": "invalid_collector_status", "detail": str(exc)})
         try:
             payload = self.body_json()
             text = str(payload.get("text", "")).strip()
@@ -210,6 +239,108 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_response(502, {"ok": False, "error": "deepseek_http_error", "status": exc.code, "detail": detail})
         except Exception as exc:
             return self.json_response(400, {"ok": False, "error": "parse_failed", "detail": str(exc)})
+
+    def handle_inflow(self):
+        try:
+            payload = self.body_json()
+            event_id = str(payload.get("event_id", "")).strip()[:240]
+            amount = float(payload.get("amount_eth", 0))
+            title = str(payload.get("title", "ETH 交易所转入"))[:300]
+            source = str(payload.get("source", ""))[:500]
+            timestamp = float(payload.get("event_timestamp") or time.time())
+            if timestamp > 10_000_000_000:
+                timestamp /= 1000
+            if not event_id:
+                raise ValueError("event_id is required")
+            if amount <= 0 or amount > 1_000_000_000:
+                raise ValueError("amount_eth is invalid")
+            when = datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone(ZoneInfo("Asia/Singapore"))
+            dry_run = bool(payload.get("dry_run", False))
+        except Exception as exc:
+            return self.json_response(400, {"ok": False, "error": "invalid_inflow", "detail": str(exc)})
+        if dry_run:
+            return self.json_response(200, {"ok": True, "dry_run": True, "event_id": event_id, "amount_eth": amount})
+        with LOCK:
+            current = load_envelope()
+            state = scrub_state(current.get("state") or {})
+            seen = list(map(str, state.get("collectorSeen", [])))
+            if event_id in set(seen):
+                return self.json_response(200, {"ok": True, "duplicate": True, "revision": current["revision"]})
+            before = float(state.get("total", 0) or 0)
+            state["total"] = before + amount
+            state["baseline"] = state["total"]
+            state.setdefault("k", 2.7)
+            state.setdefault("carryOver", 0)
+            state.setdefault("kSamples", [])
+            state.setdefault("daily", {})
+            state.setdefault("logs", [])
+            date_key = when.strftime("%Y-%m-%d")
+            day = state["daily"].setdefault(date_key, {
+                "newTransfers": 0,
+                "realizedPoints": 0,
+                "high": state.get("high", 0),
+                "openingCarry": before,
+                "transfers": [],
+                "touched": True,
+            })
+            day["newTransfers"] = float(day.get("newTransfers", 0) or 0) + amount
+            day.setdefault("transfers", []).append({
+                "amount": amount,
+                "time": when.strftime("%H:%M"),
+                "recordedAt": datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d %H:%M"),
+                "note": f"服务器自动采集 · {title}",
+                "sourceEventId": event_id,
+            })
+            remaining = state["total"] / 1000 * float(state["k"])
+            log = {
+                "id": f"auto-{event_id}",
+                "time": datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d %H:%M"),
+                "action": "auto_transfer",
+                "detail": {
+                    "amount": round(amount),
+                    "realized_points": 0,
+                    "consumed_eth": 0,
+                    "transfer_time": when.strftime("%H:%M"),
+                    "source_event_id": event_id,
+                    "source": source,
+                },
+                "state": {
+                    "total": round(state["total"]),
+                    "baseline": round(state["baseline"]),
+                    "high": round(float(state.get("high", 0) or 0)),
+                    "remaining_points": round(remaining),
+                    "k": state["k"],
+                    "k_samples": len(state.get("kSamples", [])),
+                    "daily_avg": 0,
+                    "carry_over": round(float(state.get("carryOver", 0) or 0)),
+                },
+                "note": f"服务器自动采集 · {title}",
+                "display": f"自动转入 {amount:,.0f} ETH",
+            }
+            state["logs"].append(log)
+            seen.append(event_id)
+            state["collectorSeen"] = seen[-5000:]
+            state["lastResult"] = (
+                f"🤖 服务器自动采集：{amount:,.0f} ETH\n\n"
+                f"📊 累计未兑现转入：{state['total']:,.0f} ETH"
+                f"（本轮基准：{state['baseline']:,.0f} ETH）\n\n"
+                f"🔻 预计累计砸盘：约 {remaining:,.0f} 点"
+            )
+            append_new_logs(current.get("state"), state)
+            envelope = {
+                "revision": current["revision"] + 1,
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "updated_by": "okx-collector",
+                "state": state,
+            }
+            atomic_json_write(STATE_FILE, envelope)
+        return self.json_response(200, {
+            "ok": True,
+            "duplicate": False,
+            "revision": envelope["revision"],
+            "amount_eth": amount,
+            "total": state["total"],
+        })
 
 
 if __name__ == "__main__":
