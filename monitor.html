@@ -336,13 +336,14 @@
           <div class="panel-head">
             <div><h3>手动登记台</h3><p>每次提交都会即时计算、持久化并写入操作日志</p></div>
             <div class="segmented" role="tablist">
-              <button class="active" data-pane="transferPane">ETH 转入</button>
+              <button class="active" data-pane="transferPane">手动转入</button>
               <button data-pane="realizedPane">兑现点数</button>
               <button data-pane="highPane">更新高点</button>
             </div>
           </div>
 
           <form class="form-pane active" id="transferPane">
+            <div class="notice info" id="collectorNotice">服务器每分钟自动采集交易所 ETH 转入；这里保留用于补录、修正或登记其他来源。</div>
             <div class="form-grid">
               <div class="field"><label for="transferAmount">本次转入量（ETH）</label><input id="transferAmount" inputmode="decimal" placeholder="例如：20000" required></div>
               <div class="field"><label for="transferTime">转入时间（选填）</label><input id="transferTime" type="time"></div>
@@ -561,6 +562,7 @@
           render();
         }
         setSyncStatus(`云端 R${data.revision||0}`,"online");
+        refreshCollectorStatus();
         if(!silent)toast("已同步服务器最新状态");
         return true;
       } catch(err) {
@@ -568,6 +570,18 @@
         if(!silent)toast(err.message);
         return false;
       } finally { syncBusy=false; }
+    }
+    async function refreshCollectorStatus() {
+      if(!syncConfig().token)return;
+      try {
+        const {response,data}=await syncRequest("/collector");
+        if(!response.ok||!data.collector)return;
+        const c=data.collector, when=c.last_poll?new Date(c.last_poll).toLocaleString("zh-CN",{hour12:false}):"等待首次轮询";
+        $("collectorNotice").textContent=c.last_error
+          ? `自动采集最近一次出现异常：${c.last_error}；手动补录仍可正常使用。`
+          : `自动采集运行中 · 每 60 秒检查 · 最近轮询 ${when} · 本次读取 ${c.events_seen||0} 条。这里仍可手动补录。`;
+        $("collectorNotice").className=`notice ${c.last_error?"warn":"info"}`;
+      } catch {}
     }
     async function syncPush() {
       const cfg=syncConfig();
@@ -939,7 +953,7 @@
       return { level:"节奏正常", text:`今日新增 ${fmt(todayAmount)} ETH，处于近期日均的正常区间。`, tone:"neutral" };
     }
     function actionLabel(action) {
-      return ({transfer:"ETH 转入",realized:"兑现扣减",high_update:"高点更新",settings:"模型设置",day_init:"每日初始化",undo:"撤销操作",restore:"数据恢复",natural_language:"口语指令"})[action] || action;
+      return ({transfer:"手动 ETH 转入",auto_transfer:"自动 ETH 转入",realized:"兑现扣减",high_update:"高点更新",settings:"模型设置",day_init:"每日初始化",undo:"撤销操作",restore:"数据恢复",natural_language:"口语指令"})[action] || action;
     }
 
     function render() {
