@@ -1,0 +1,686 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#171b35">
+  <meta name="description" content="手动登记 ETH 转入、高点和兑现数据，按自定义 k 值测算剩余压力。">
+  <title>ETH 转入压力监控台</title>
+  <style>
+    :root {
+      --ink: #171b35;
+      --ink-2: #24294c;
+      --paper: #f5f4ef;
+      --card: #fffef9;
+      --line: #d9d7cb;
+      --muted: #747583;
+      --violet: #7569ff;
+      --violet-soft: #e7e4ff;
+      --cyan: #3bc7c4;
+      --cyan-soft: #dff7f5;
+      --coral: #ee6b5f;
+      --coral-soft: #ffe6e0;
+      --amber: #efaa42;
+      --shadow: 0 18px 55px rgba(23, 27, 53, .10);
+      --radius: 22px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 3%, rgba(117,105,255,.16), transparent 26rem),
+        radial-gradient(circle at 95% 12%, rgba(59,199,196,.13), transparent 24rem),
+        var(--paper);
+      font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      min-height: 100vh;
+    }
+    button, input, select, textarea { font: inherit; }
+    button { cursor: pointer; }
+    .shell { width: min(1440px, calc(100% - 32px)); margin: 0 auto; padding: 24px 0 56px; }
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between; gap: 18px;
+      padding: 4px 2px 24px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-mark {
+      width: 42px; height: 42px; border-radius: 13px; display: grid; place-items: center;
+      color: white; font: 700 13px/1 Consolas, monospace; letter-spacing: -.6px;
+      background: linear-gradient(145deg, var(--violet), #4a40bd);
+      box-shadow: 0 9px 24px rgba(117,105,255,.28);
+    }
+    .brand h1 { font: 700 20px/1.1 Bahnschrift, "Microsoft YaHei UI", sans-serif; margin: 0; letter-spacing: -.4px; }
+    .brand p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .top-actions { display: flex; align-items: center; gap: 8px; }
+    .date-chip, .ghost-btn {
+      border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.65);
+      color: var(--ink); padding: 9px 14px; font-size: 13px;
+    }
+    .ghost-btn:hover { border-color: var(--violet); color: var(--violet); }
+
+    .hero {
+      position: relative; overflow: hidden; min-height: 330px; border-radius: 30px;
+      padding: clamp(24px, 4vw, 48px); color: white; background:
+        linear-gradient(120deg, rgba(255,255,255,.05), transparent 40%),
+        var(--ink);
+      box-shadow: var(--shadow);
+      display: grid; grid-template-columns: 1.3fr .7fr; gap: 28px; align-items: center;
+    }
+    .hero::before, .hero::after {
+      content: ""; position: absolute; border-radius: 50%; pointer-events: none;
+    }
+    .hero::before { width: 390px; height: 390px; right: -190px; top: -220px; border: 75px solid rgba(117,105,255,.25); }
+    .hero::after { width: 210px; height: 210px; left: 44%; bottom: -170px; border: 45px solid rgba(59,199,196,.14); }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 8px; color: #b9b5ff;
+      font: 700 12px/1 Consolas, monospace; letter-spacing: 1.5px; text-transform: uppercase;
+    }
+    .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 0 5px rgba(59,199,196,.12); }
+    .hero h2 { margin: 22px 0 4px; font: 600 clamp(24px,4vw,48px)/1 Bahnschrift, sans-serif; letter-spacing: -1.5px; }
+    .hero-number { font: 700 clamp(50px,8vw,96px)/.95 Bahnschrift, sans-serif; letter-spacing: -4px; }
+    .hero-number small { font-size: .22em; letter-spacing: 1px; color: #c9cbe0; margin-left: 8px; }
+    .hero-sub { color: #aeb2cc; font-size: 13px; margin-top: 14px; }
+    .gauge-wrap { display: grid; place-items: center; position: relative; z-index: 1; }
+    .gauge {
+      --p: 0;
+      width: min(235px, 40vw); aspect-ratio: 1; border-radius: 50%;
+      background: conic-gradient(var(--coral) calc(var(--p) * 1%), rgba(255,255,255,.10) 0);
+      display: grid; place-items: center; transform: rotate(-90deg);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
+    }
+    .gauge::before { content: ""; width: 76%; height: 76%; border-radius: 50%; background: var(--ink); }
+    .gauge-label { position: absolute; text-align: center; }
+    .gauge-label strong { display: block; font: 700 38px/1 Bahnschrift; }
+    .gauge-label span { color: #aeb2cc; font-size: 12px; }
+
+    .ticker {
+      margin: 16px 0; padding: 12px 16px; border: 1px solid var(--line); border-radius: 14px;
+      background: rgba(255,255,255,.55); display: flex; gap: 18px; align-items: center; overflow: hidden;
+      font-size: 13px;
+    }
+    .ticker b { color: var(--violet); white-space: nowrap; }
+    .ticker span { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .target-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+    .target {
+      border: 1px solid var(--line); border-radius: var(--radius); background: var(--card);
+      padding: 22px; position: relative; overflow: hidden;
+    }
+    .target::after { content:""; position:absolute; width:60px; height:60px; border-radius:50%; right:-30px; top:-30px; background:var(--tone); opacity:.25; }
+    .target:nth-child(1) { --tone: var(--cyan); }
+    .target:nth-child(2) { --tone: var(--amber); }
+    .target:nth-child(3) { --tone: var(--coral); }
+    .target-label { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+    .target-value { font: 700 clamp(26px,4vw,38px)/1 Bahnschrift; letter-spacing: -1px; }
+    .target-delta { margin-top: 8px; font: 12px/1.2 Consolas, monospace; color: var(--muted); }
+
+    .workspace { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 16px; align-items: start; }
+    .panel { border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); padding: 22px; box-shadow: 0 8px 30px rgba(23,27,53,.04); }
+    .panel + .panel { margin-top: 16px; }
+    .panel-head { display: flex; justify-content: space-between; align-items: start; gap: 12px; margin-bottom: 20px; }
+    .panel-head h3 { margin: 0; font: 700 18px/1.2 Bahnschrift, sans-serif; }
+    .panel-head p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .segmented { display: flex; gap: 5px; background: #eeede7; padding: 4px; border-radius: 12px; }
+    .segmented button { border: 0; border-radius: 9px; padding: 8px 12px; background: transparent; color: var(--muted); font-size: 12px; }
+    .segmented button.active { color: white; background: var(--ink-2); }
+    .form-pane { display: none; }
+    .form-pane.active { display: block; animation: rise .22s ease both; }
+    @keyframes rise { from { opacity: 0; transform: translateY(5px); } }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 13px; }
+    .field { display: grid; gap: 7px; }
+    .field.full { grid-column: 1 / -1; }
+    label { color: #55586c; font-size: 12px; font-weight: 600; }
+    input, textarea, select {
+      width: 100%; border: 1px solid var(--line); border-radius: 12px; background: white;
+      color: var(--ink); padding: 12px 13px; outline: none; transition: .2s;
+    }
+    input:focus, textarea:focus, select:focus { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(117,105,255,.12); }
+    textarea { resize: vertical; min-height: 42px; }
+    .quick-row { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 9px; }
+    .quick {
+      border: 1px dashed #aaa7c8; border-radius: 9px; padding: 7px 10px; color: #5b55b2;
+      background: var(--violet-soft); font-size: 11px;
+    }
+    .submit {
+      width: 100%; margin-top: 14px; border: 0; border-radius: 13px; padding: 13px 18px;
+      color: white; background: var(--violet); font-weight: 700; box-shadow: 0 8px 20px rgba(117,105,255,.2);
+    }
+    .submit.coral { background: var(--coral); box-shadow: 0 8px 20px rgba(238,107,95,.18); }
+    .submit.dark { background: var(--ink); box-shadow: none; }
+
+    .result-box {
+      border-radius: 16px; padding: 17px; background: #f1f0ea; min-height: 114px;
+      font-size: 13px; line-height: 1.75; white-space: pre-line;
+    }
+    .result-box strong { color: var(--violet); }
+    .progress { height: 9px; border-radius: 99px; background: #dfded7; overflow: hidden; margin: 10px 0 5px; }
+    .progress i { display: block; height: 100%; width: 0; background: linear-gradient(90deg,var(--violet),var(--cyan)); border-radius: inherit; transition: width .4s ease; }
+    .snapshot { display: grid; gap: 0; }
+    .snapshot-row { display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px dashed var(--line); padding: 10px 0; font-size: 13px; }
+    .snapshot-row:last-child { border-bottom: 0; }
+    .snapshot-row span { color: var(--muted); }
+    .snapshot-row b { text-align: right; }
+    .notice { border-radius: 14px; padding: 13px 15px; margin-bottom: 12px; font-size: 12px; line-height: 1.55; }
+    .notice.info { background: var(--cyan-soft); color: #236c6a; }
+    .notice.warn { background: var(--coral-soft); color: #9c3d35; }
+    .notice.neutral { background: var(--violet-soft); color: #5149a3; }
+    .chart { height: 145px; display: flex; align-items: end; gap: 3px; padding-top: 12px; }
+    .bar-wrap { flex: 1; height: 100%; display: flex; align-items: end; position: relative; }
+    .bar { width: 100%; min-height: 2px; border-radius: 4px 4px 1px 1px; background: #ccc9f8; transition: .2s; }
+    .bar.hot { background: var(--coral); }
+    .chart-axis { display: flex; justify-content: space-between; color: var(--muted); font: 10px Consolas, monospace; margin-top: 6px; }
+
+    .log-tools { display: flex; gap: 7px; flex-wrap: wrap; }
+    .mini-btn { border: 1px solid var(--line); background: white; border-radius: 9px; padding: 7px 10px; font-size: 11px; color: var(--ink); }
+    .mini-btn:hover { border-color: var(--violet); }
+    .mini-btn.danger { color: var(--coral); }
+    .log-list { display: grid; gap: 9px; max-height: 360px; overflow: auto; padding-right: 3px; }
+    .log-item { display: grid; grid-template-columns: 8px 1fr auto; gap: 11px; align-items: start; padding: 11px 0; border-bottom: 1px solid #ebe9e1; }
+    .log-dot { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: var(--violet); }
+    .log-main b { display: block; font-size: 12px; }
+    .log-main span, .log-time { color: var(--muted); font-size: 11px; }
+    .empty { text-align: center; padding: 28px 10px; color: var(--muted); font-size: 12px; }
+    .footer { color: var(--muted); font-size: 11px; line-height: 1.6; text-align: center; padding-top: 24px; }
+
+    dialog { border: 0; padding: 0; border-radius: 24px; width: min(560px, calc(100% - 28px)); color: var(--ink); box-shadow: 0 28px 100px rgba(12,15,32,.35); }
+    dialog::backdrop { background: rgba(15,18,40,.62); backdrop-filter: blur(5px); }
+    .dialog-inner { padding: clamp(22px,5vw,34px); background: var(--card); }
+    .dialog-inner h3 { margin: 0 0 6px; font: 700 24px Bahnschrift; }
+    .dialog-inner > p { margin: 0 0 20px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+    .checkline { display: flex; align-items: center; gap: 8px; padding-top: 6px; }
+    .checkline input { width: auto; }
+    .toast {
+      position: fixed; left: 50%; bottom: 24px; transform: translate(-50%,20px); z-index: 100;
+      background: var(--ink); color: white; padding: 11px 16px; border-radius: 12px;
+      box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: .25s; font-size: 12px;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%,0); }
+    .settings-grid { display: grid; gap: 10px; }
+    .setting { display: grid; grid-template-columns: 1fr 120px; gap: 12px; align-items: center; }
+    .setting p { margin: 3px 0 0; color: var(--muted); font-size: 11px; }
+    .hidden { display: none !important; }
+
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; }
+      .gauge-wrap { position: absolute; right: 22px; bottom: 22px; opacity: .8; }
+      .gauge { width: 145px; }
+      .gauge-label strong { font-size: 25px; }
+      .workspace { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 20px, 1440px); padding-top: 12px; }
+      .brand p, .date-chip { display: none; }
+      .hero { padding: 24px; min-height: 290px; }
+      .hero-number { letter-spacing: -2px; }
+      .gauge-wrap { right: 15px; bottom: 15px; }
+      .gauge { width: 115px; }
+      .gauge-label strong { font-size: 21px; }
+      .gauge-label span { font-size: 9px; }
+      .target-grid { grid-template-columns: 1fr; }
+      .target { padding: 17px; display: grid; grid-template-columns: 1fr auto; align-items: center; }
+      .target-label { margin: 0; }
+      .target-delta { grid-column: 1/-1; }
+      .panel { padding: 17px; }
+      .panel-head { flex-direction: column; }
+      .form-grid { grid-template-columns: 1fr; }
+      .field.full { grid-column: auto; }
+      .segmented { width: 100%; }
+      .segmented button { flex: 1; padding-inline: 5px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">ETH<br>PM</div>
+        <div><h1>ETH 转入压力监控台</h1><p>TRANSFER PRESSURE MONITOR · 手动数据模型</p></div>
+      </div>
+      <div class="top-actions">
+        <span class="date-chip" id="todayChip"></span>
+        <button class="ghost-btn" id="openInit">每日初始化</button>
+      </div>
+    </header>
+
+    <section class="hero" aria-label="当前压力概览">
+      <div>
+        <span class="eyebrow"><i class="pulse"></i> LIVE LOCAL STATE</span>
+        <h2>累计未兑现转入</h2>
+        <div class="hero-number"><span id="heroTotal">0</span><small>ETH</small></div>
+        <div class="hero-sub" id="heroSub">本轮基准 0 ETH · 含顺延 0 ETH</div>
+      </div>
+      <div class="gauge-wrap">
+        <div class="gauge" id="pressureGauge"></div>
+        <div class="gauge-label"><strong id="gaugePoints">0</strong><span>预计剩余点数</span></div>
+      </div>
+    </section>
+
+    <div class="ticker"><b id="riskLevel">状态正常</b><span id="riskTicker">录入转入数据后开始测算压力。</span></div>
+
+    <section class="target-grid" aria-label="目标价测算">
+      <article class="target"><div class="target-label">保守目标价 · 60% 压力</div><div class="target-value" id="targetSafe">—</div><div class="target-delta" id="deltaSafe">等待录入当日高点</div></article>
+      <article class="target"><div class="target-label">中性目标价 · 100% 压力</div><div class="target-value" id="targetNeutral">—</div><div class="target-delta" id="deltaNeutral">等待录入当日高点</div></article>
+      <article class="target"><div class="target-label">悲观目标价 · 150% 压力</div><div class="target-value" id="targetRisk">—</div><div class="target-delta" id="deltaRisk">等待录入当日高点</div></article>
+    </section>
+
+    <section class="workspace">
+      <div>
+        <article class="panel">
+          <div class="panel-head">
+            <div><h3>手动登记台</h3><p>每次提交都会即时计算、持久化并写入操作日志</p></div>
+            <div class="segmented" role="tablist">
+              <button class="active" data-pane="transferPane">ETH 转入</button>
+              <button data-pane="realizedPane">兑现点数</button>
+              <button data-pane="highPane">更新高点</button>
+            </div>
+          </div>
+
+          <form class="form-pane active" id="transferPane">
+            <div class="form-grid">
+              <div class="field"><label for="transferAmount">本次转入量（ETH）</label><input id="transferAmount" inputmode="decimal" placeholder="例如：20000" required></div>
+              <div class="field"><label for="transferTime">转入时间（选填）</label><input id="transferTime" type="time"></div>
+              <div class="field full"><label for="transferNote">备注（选填）</label><input id="transferNote" placeholder="例如：下午观察到的第二笔转入"></div>
+            </div>
+            <div class="quick-row"><button type="button" class="quick" data-add="1000">+1,000</button><button type="button" class="quick" data-add="5000">+5,000</button><button type="button" class="quick" data-add="10000">+10,000</button><button type="button" class="quick" data-add="20000">+20,000 ETH</button></div>
+            <button class="submit" type="submit">登记转入并重新测算</button>
+          </form>
+
+          <form class="form-pane" id="realizedPane">
+            <div class="form-grid">
+              <div class="field"><label for="realizedPoints">本次已兑现（点）</label><input id="realizedPoints" inputmode="decimal" placeholder="例如：50" required></div>
+              <div class="field"><label for="realizedTime">发生时间（选填）</label><input id="realizedTime" type="time"></div>
+              <div class="field full"><label for="realizedNote">备注（选填）</label><input id="realizedNote" placeholder="本次兑现说明"></div>
+            </div>
+            <button class="submit coral" type="submit">登记兑现并扣减压力</button>
+          </form>
+
+          <form class="form-pane" id="highPane">
+            <div class="form-grid">
+              <div class="field full"><label for="highPrice">今日目前最高点</label><input id="highPrice" inputmode="decimal" placeholder="例如：3800" required></div>
+            </div>
+            <button class="submit dark" type="submit">更新高点并重算目标价</button>
+          </form>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head"><div><h3>当日转入节奏</h3><p id="rhythmSummary">尚无带时间的转入记录</p></div><span class="eyebrow" style="color:var(--violet)">24H FLOW</span></div>
+          <div id="rhythmNotice" class="notice neutral">录入具体时间后，将识别两小时集中转入和最高风险窗口。</div>
+          <div class="chart" id="hourChart" aria-label="24小时转入量柱状图"></div>
+          <div class="chart-axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:00</span></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div><h3>操作日志</h3><p>本机追加保存，可随时导出标准 JSONL</p></div>
+            <div class="log-tools">
+              <button class="mini-btn" id="undoBtn">撤销上一步</button>
+              <button class="mini-btn" id="exportBtn">导出 JSONL</button>
+              <button class="mini-btn" id="importBtn">导入恢复</button>
+              <input class="hidden" id="importFile" type="file" accept=".jsonl,.txt,application/json">
+            </div>
+          </div>
+          <div class="log-list" id="logList"></div>
+        </article>
+      </div>
+
+      <aside>
+        <article class="panel">
+          <div class="panel-head"><div><h3>本次计算回执</h3><p>按固定公式输出整数结果</p></div></div>
+          <div class="result-box" id="lastResult">等待录入数据。<br><br>当前 k 值为 <strong>2.7</strong>。</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head"><div><h3>状态快照</h3><p>浏览器本机实时持久化</p></div></div>
+          <div id="alertArea"></div>
+          <div class="progress"><i id="releaseProgress"></i></div>
+          <div style="display:flex;justify-content:space-between;color:var(--muted);font-size:11px;margin-bottom:10px"><span>压力释放进度</span><b id="releasePercent">0%</b></div>
+          <div class="snapshot" id="snapshot"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head"><div><h3>模型设置</h3><p>修改也会写入日志并保留痕迹</p></div></div>
+          <form id="settingsForm" class="settings-grid">
+            <div class="setting"><div><label for="kInput">当前 k 值</label><p>默认 2.7，用于压力与消耗量换算</p></div><input id="kInput" type="number" min=".1" max="20" step=".1"></div>
+            <div class="setting"><div><label for="avgWindow">日均统计周期</label><p>至少有 5 天数据后启用异常预警</p></div><select id="avgWindow"><option value="5">最近 5 天</option><option value="7">最近 7 天</option><option value="10">最近 10 天</option></select></div>
+            <button class="submit dark" type="submit">保存模型设置</button>
+          </form>
+        </article>
+      </aside>
+    </section>
+
+    <footer class="footer">本工具只对手动录入的数据执行记录和数学测算，不代表真实卖出行为或市场走势，也不构成投资建议。<br>数据默认保存在当前浏览器；更换设备前请导出 JSONL 备份。</footer>
+  </main>
+
+  <dialog id="initDialog">
+    <form method="dialog" class="dialog-inner" id="initForm">
+      <h3>开始今天的记录</h3>
+      <p>昨天最终砸了多少点？今天目前高点在哪？有没有新的转入要登记？三项可以一次完成。</p>
+      <div class="form-grid">
+        <div class="field"><label for="initRealized">昨日最终兑现点数</label><input id="initRealized" inputmode="decimal" placeholder="例如：40"></div>
+        <div class="field"><label for="initHigh">今日目前高点</label><input id="initHigh" inputmode="decimal" placeholder="例如：3800"></div>
+        <div class="field"><label for="initTransfer">今日已有转入（ETH）</label><input id="initTransfer" inputmode="decimal" placeholder="例如：20000"></div>
+        <div class="field"><label for="initTime">转入时间（选填）</label><input id="initTime" type="time"></div>
+        <label class="checkline field full"><input id="initNoRealized" type="checkbox"> 昨日未兑现，全部压力顺延</label>
+      </div>
+      <button class="submit" value="default" type="submit">完成今日初始化</button>
+      <button class="mini-btn" style="width:100%;margin-top:8px" value="cancel" type="button" id="initLater">稍后填写</button>
+    </form>
+  </dialog>
+  <div class="toast" id="toast"></div>
+
+  <script>
+  (() => {
+    "use strict";
+    const DB_NAME = "eth-pressure-monitor";
+    const STORE = "app";
+    const STATE_KEY = "state";
+    const $ = (id) => document.getElementById(id);
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    const localDate = (date = new Date()) => {
+      const y = date.getFullYear(), m = String(date.getMonth()+1).padStart(2,"0"), d = String(date.getDate()).padStart(2,"0");
+      return `${y}-${m}-${d}`;
+    };
+    const yesterday = () => { const d = new Date(); d.setDate(d.getDate()-1); return localDate(d); };
+    const nowTime = () => new Date().toLocaleString("sv-SE", {hour12:false}).slice(0,16);
+    const num = (v) => {
+      const n = Number(String(v ?? "").replace(/[,\s，]/g,""));
+      return Number.isFinite(n) ? n : 0;
+    };
+    const round = (v) => Math.round(Number(v) || 0);
+    const fmt = (v) => round(v).toLocaleString("zh-CN");
+    const pct = (v) => `${Math.max(0,Math.min(100,round(v)))}%`;
+    const uid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+
+    const initialState = () => ({
+      version: 1,
+      total: 0,
+      baseline: 0,
+      high: 0,
+      k: 2.7,
+      kSamples: [],
+      carryOver: 0,
+      totalRealized: 0,
+      lastActiveDate: localDate(),
+      initializedDates: [],
+      daily: {},
+      logs: [],
+      avgWindow: 5,
+      lastResult: "",
+      undo: null
+    });
+    let state = initialState();
+    let db;
+
+    function openDB() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+        req.onsuccess = () => { db = req.result; resolve(db); };
+        req.onerror = () => reject(req.error);
+      });
+    }
+    function dbGet(key) {
+      return new Promise((resolve, reject) => {
+        const req = db.transaction(STORE).objectStore(STORE).get(key);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+    function dbSet(key, value) {
+      return new Promise((resolve, reject) => {
+        const req = db.transaction(STORE, "readwrite").objectStore(STORE).put(value, key);
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+      });
+    }
+    async function save() {
+      try { await dbSet(STATE_KEY, state); }
+      catch { localStorage.setItem(DB_NAME, JSON.stringify(state)); }
+    }
+    function ensureDaily(date = localDate()) {
+      if (!state.daily[date]) state.daily[date] = { newTransfers:0, realizedPoints:0, high:0, openingCarry:state.total, transfers:[], touched:true };
+      return state.daily[date];
+    }
+    function rollDay() {
+      const today = localDate();
+      if (state.lastActiveDate !== today) {
+        state.carryOver = state.total;
+        state.high = 0;
+        state.lastActiveDate = today;
+        ensureDaily(today).openingCarry = state.total;
+      }
+      ensureDaily(today);
+    }
+    function pressurePoints(total = state.total) { return total / 1000 * state.k; }
+    function releasedPercent() {
+      if (!state.baseline) return 0;
+      return Math.max(0, Math.min(100, (state.baseline - state.total) / state.baseline * 100));
+    }
+    function dailyStats() {
+      const dates = Object.keys(state.daily).filter(d => d !== localDate() && state.daily[d].touched).sort().slice(-state.avgWindow);
+      const values = dates.map(d => Number(state.daily[d].newTransfers) || 0);
+      return { days: values.length, avg: values.length ? values.reduce((a,b)=>a+b,0)/values.length : 0 };
+    }
+    function targetValues() {
+      const p = pressurePoints();
+      return { p, safe: state.high - p*.6, neutral: state.high-p, risk: state.high-p*1.5 };
+    }
+    function snapshotForLog() {
+      const d = dailyStats();
+      return {
+        total: round(state.total), baseline: round(state.baseline), high: round(state.high),
+        remaining_points: round(pressurePoints()), k: state.k, k_samples: state.kSamples.length,
+        daily_avg: round(d.avg), carry_over: round(state.carryOver)
+      };
+    }
+    function addLog(action, detail={}, note="", display="") {
+      state.logs.push({
+        id: uid(), time: nowTime(), action, detail, state: snapshotForLog(), note,
+        display: display || action
+      });
+      if (state.logs.length > 1000) state.logs = state.logs.slice(-1000);
+    }
+    function prepareUndo() {
+      const copy = clone(state);
+      copy.undo = null;
+      state.undo = copy;
+    }
+    function setResult(text) { state.lastResult = text; }
+    function toast(message) {
+      const el = $("toast"); el.textContent = message; el.classList.add("show");
+      clearTimeout(toast.timer); toast.timer = setTimeout(()=>el.classList.remove("show"), 2300);
+    }
+
+    async function addTransfer(amount, time="", note="", opts={}) {
+      amount = num(amount);
+      if (amount <= 0) throw new Error("请输入大于 0 的 ETH 转入量");
+      if (!opts.skipUndo) prepareUndo();
+      const carriedBefore = state.carryOver;
+      state.total += amount;
+      state.baseline = state.total;
+      const day = ensureDaily();
+      day.newTransfers += amount;
+      day.transfers.push({ amount, time, recordedAt: nowTime(), note });
+      const p = pressurePoints();
+      const t = targetValues();
+      const carryText = carriedBefore > 0 ? `\n含昨日顺延 ${fmt(carriedBefore)} ETH + 今日新增 ${fmt(amount)} ETH` : "";
+      setResult(`📥 本次转入：${fmt(amount)} ETH\n\n📊 累计未兑现转入：${fmt(state.total)} ETH（本轮基准：${fmt(state.baseline)} ETH）${carryText}\n\n🔻 预计累计砸盘：约 ${fmt(p)} 点\n\n🎯 保守目标价：${state.high ? fmt(state.high)+" - "+fmt(p*.6)+" = "+fmt(t.safe) : "等待录入高点"}\n中性目标价：${state.high ? fmt(state.high)+" - "+fmt(p)+" = "+fmt(t.neutral) : "等待录入高点"}\n悲观目标价：${state.high ? fmt(state.high)+" - "+fmt(p*1.5)+" = "+fmt(t.risk) : "等待录入高点"}`);
+      addLog("transfer", {amount:round(amount), realized_points:0, consumed_eth:0, transfer_time:time}, note, `转入 ${fmt(amount)} ETH`);
+      await save(); render();
+    }
+
+    async function addRealized(points, time="", note="", opts={}) {
+      points = num(points);
+      if (points <= 0) throw new Error("请输入大于 0 的兑现点数");
+      if (state.total <= 0) throw new Error("当前没有可扣减的未兑现转入");
+      if (!opts.skipUndo) prepareUndo();
+      const preTotal = state.total;
+      const actualK = points / (preTotal / 1000);
+      const rawConsumed = points / state.k * 1000;
+      const consumed = Math.min(preTotal, rawConsumed);
+      state.kSamples.push({ value: actualK, time: nowTime(), points, base: preTotal });
+      state.total = Math.max(0, preTotal - consumed);
+      state.carryOver = Math.max(0, state.carryOver - consumed);
+      state.totalRealized += points;
+      ensureDaily().realizedPoints += points;
+      const release = releasedPercent(), remain = pressurePoints(), t = targetValues();
+      let suggestion = "";
+      if (state.kSamples.length >= 3) {
+        const recent = state.kSamples.slice(-5).map(x=>x.value);
+        const mean = recent.reduce((a,b)=>a+b,0)/recent.length;
+        if (Math.abs(mean-state.k) > .5) suggestion = `\n\n⚠️ 近期实际 k 值均值为 ${mean.toFixed(1)}，与当前 k 值偏差较大，建议在模型设置中确认更新。`;
+      }
+      const low = state.high ? Math.min(t.safe,t.risk) : 0, high = state.high ? Math.max(t.safe,t.risk) : 0;
+      setResult(`✅ 本次兑现：${fmt(points)} 点（消耗约 ${fmt(consumed)} ETH）\n\n📊 剩余未兑现转入：${fmt(state.total)} ETH（已释放 ${pct(release)}，本轮基准：${fmt(state.baseline)} ETH）\n\n🔻 剩余砸盘力度：约 ${fmt(remain)} 点\n\n⏳ 压力释放进度：${progressText(release)} ${pct(release)}\n\n🎯 剩余目标价区间：${state.high ? fmt(low)+" ～ "+fmt(high) : "等待录入高点"}${suggestion}`);
+      addLog("realized", {amount:0, realized_points:round(points), consumed_eth:round(consumed), actual_k:Number(actualK.toFixed(3)), realized_time:time}, note, `兑现 ${fmt(points)} 点 · 消耗 ${fmt(consumed)} ETH`);
+      await save(); render();
+    }
+
+    async function updateHigh(value, opts={}) {
+      const high = num(value);
+      if (high <= 0) throw new Error("请输入大于 0 的当日高点");
+      if (!opts.skipUndo) prepareUndo();
+      state.high = high; ensureDaily().high = high;
+      const t = targetValues();
+      setResult(`📈 当日基准高点已更新：${fmt(high)}\n\n🔻 当前剩余砸盘力度：约 ${fmt(t.p)} 点\n\n🎯 保守目标价：${fmt(t.safe)}\n中性目标价：${fmt(t.neutral)}\n悲观目标价：${fmt(t.risk)}`);
+      addLog("high_update", {amount:0, realized_points:0, consumed_eth:0, high:round(high)}, "", `更新高点至 ${fmt(high)}`);
+      await save(); render();
+    }
+
+    function progressText(value) {
+      const filled = Math.round(Math.max(0,Math.min(100,value))/10);
+      return "█".repeat(filled)+"░".repeat(10-filled);
+    }
+    function analyzeRhythm() {
+      const transfers = ensureDaily().transfers.filter(x => x.time);
+      const hours = Array(24).fill(0);
+      transfers.forEach(x => { const h = Number(x.time.slice(0,2)); if (h>=0 && h<24) hours[h] += x.amount; });
+      if (!transfers.length) return { hours, text:"录入具体时间后，将识别两小时集中转入和最高风险窗口。", summary:"尚无带时间的转入记录", tone:"neutral", maxWindow:null };
+      let max=0, start=0;
+      for (let i=0;i<24;i++) {
+        const sum=hours[i]+(i<23?hours[i+1]:0);
+        if (sum>max) { max=sum; start=i; }
+      }
+      const times = transfers.map(x=>Number(x.time.slice(0,2))*60+Number(x.time.slice(3,5))).sort((a,b)=>a-b);
+      let concentrated = false;
+      for (let i=0;i<times.length;i++) for (let j=i+1;j<times.length;j++) if (times[j]-times[i]<=120) concentrated=true;
+      const end = Math.min(24,start+2);
+      return {
+        hours, maxWindow:[start,end],
+        summary:`${transfers.length} 笔带时间记录 · 风险窗口 ${String(start).padStart(2,"0")}:00–${String(end).padStart(2,"0")}:00`,
+        text: concentrated && transfers.length>1 ? `转入集中，短期砸盘概率较高。当前最高风险窗口为 ${String(start).padStart(2,"0")}:00–${String(end).padStart(2,"0")}:00，窗口内合计 ${fmt(max)} ETH。` : `转入较分散，压力可能被稀释，砸盘节奏较缓。当前最高风险窗口为 ${String(start).padStart(2,"0")}:00–${String(end).padStart(2,"0")}:00。`,
+        tone: concentrated && transfers.length>1 ? "warn" : "info"
+      };
+    }
+    function riskInfo() {
+      const stats = dailyStats(), todayAmount = ensureDaily().newTransfers;
+      if (stats.days < 5) return { level:"静默积累中", text:`近期日均样本 ${stats.days}/5 天；满 5 天后启用异常预警。`, tone:"neutral" };
+      if (todayAmount > stats.avg*1.5) return { level:"异常偏高", text:`今日转入量异常偏高（超均值 ${fmt((todayAmount/stats.avg-1)*100)}%），砸盘风险显著上升，请提高警惕。`, tone:"warn" };
+      if (todayAmount < stats.avg*.5) return { level:"压力偏低", text:"今日转入量偏低，短期砸盘压力较小。", tone:"info" };
+      return { level:"节奏正常", text:`今日新增 ${fmt(todayAmount)} ETH，处于近期日均的正常区间。`, tone:"neutral" };
+    }
+    function actionLabel(action) {
+      return ({transfer:"ETH 转入",realized:"兑现扣减",high_update:"高点更新",settings:"模型设置",day_init:"每日初始化",undo:"撤销操作",restore:"数据恢复"})[action] || action;
+    }
+
+    function render() {
+      const t = targetValues(), stats = dailyStats(), rel = releasedPercent(), risk = riskInfo(), rhythm = analyzeRhythm();
+      $("todayChip").textContent = new Date().toLocaleDateString("zh-CN",{year:"numeric",month:"long",day:"numeric",weekday:"short"});
+      $("heroTotal").textContent = fmt(state.total);
+      $("heroSub").textContent = `本轮基准 ${fmt(state.baseline)} ETH · 含顺延 ${fmt(state.carryOver)} ETH`;
+      $("gaugePoints").textContent = fmt(t.p);
+      $("pressureGauge").style.setProperty("--p", Math.min(100, state.baseline ? state.total/state.baseline*100 : 0));
+      $("riskLevel").textContent = risk.level;
+      $("riskTicker").textContent = risk.text;
+      const targets = [["targetSafe","deltaSafe",t.safe,t.p*.6],["targetNeutral","deltaNeutral",t.neutral,t.p],["targetRisk","deltaRisk",t.risk,t.p*1.5]];
+      targets.forEach(([v,d,val,delta])=>{ $(v).textContent=state.high?fmt(val):"—"; $(d).textContent=state.high?`高点 ${fmt(state.high)} − ${fmt(delta)} 点`:"等待录入当日高点"; });
+      $("lastResult").innerHTML = (state.lastResult || `等待录入数据。\n\n当前 k 值为 <strong>${state.k}</strong>。`).replace(/\n/g,"<br>");
+      $("releaseProgress").style.width = pct(rel); $("releasePercent").textContent = pct(rel);
+      $("snapshot").innerHTML = [
+        ["累计未兑现转入",`${fmt(state.total)} ETH`],["其中顺延",`${fmt(state.carryOver)} ETH`],
+        ["本轮基准",`${fmt(state.baseline)} ETH`],["剩余砸盘力度",`约 ${fmt(t.p)} 点`],
+        ["当日基准高点",state.high?fmt(state.high):"待录入"],["当前 k 值",state.k],
+        ["k 值样本",`${state.kSamples.length} 条（需 ≥ 3 条）`],["近期日均转入",`${fmt(stats.avg)} ETH（${stats.days} 天）`]
+      ].map(x=>`<div class="snapshot-row"><span>${x[0]}</span><b>${x[1]}</b></div>`).join("");
+      let alerts = `<div class="notice ${risk.tone}">${risk.text}</div>`;
+      if (state.total > 0 && state.carryOver > 0) alerts += `<div class="notice warn">⚠️ 剩余 ${fmt(state.carryOver)} ETH 压力已顺延至今日，并与今日新增合并计算。</div>`;
+      $("alertArea").innerHTML = alerts;
+      $("rhythmNotice").className = `notice ${rhythm.tone}`; $("rhythmNotice").textContent = rhythm.text; $("rhythmSummary").textContent = rhythm.summary;
+      const maxHour = Math.max(...rhythm.hours,1);
+      $("hourChart").innerHTML = rhythm.hours.map((value,h)=>`<div class="bar-wrap" title="${String(h).padStart(2,"0")}:00 · ${fmt(value)} ETH"><i class="bar ${rhythm.maxWindow && h>=rhythm.maxWindow[0] && h<rhythm.maxWindow[1] ? "hot":""}" style="height:${Math.max(2,value/maxHour*100)}%"></i></div>`).join("");
+      $("logList").innerHTML = state.logs.length ? state.logs.slice().reverse().slice(0,80).map(log=>`<div class="log-item"><i class="log-dot"></i><div class="log-main"><b>${actionLabel(log.action)}</b><span>${escapeHtml(log.display || log.note || "")}</span></div><span class="log-time">${log.time.slice(5)}</span></div>`).join("") : `<div class="empty">还没有操作记录</div>`;
+      $("kInput").value = state.k; $("avgWindow").value = String(state.avgWindow);
+      $("undoBtn").disabled = !state.undo;
+    }
+    function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+    async function exportJSONL() {
+      if (!state.logs.length) return toast("暂无日志可导出");
+      const lines = state.logs.map((log,i) => JSON.stringify({...log, backup: i===state.logs.length-1 ? {...clone(state),undo:null} : undefined}));
+      const blob = new Blob([lines.join("\n")+"\n"],{type:"application/x-ndjson;charset=utf-8"});
+      const a = document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="ETH_monitor_log.jsonl"; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),1000); toast("JSONL 日志已导出");
+    }
+    async function importJSONL(file) {
+      const text = await file.text();
+      const records = text.split(/\r?\n/).filter(Boolean).map(line=>JSON.parse(line));
+      if (!records.length) throw new Error("文件中没有有效日志");
+      const backup = [...records].reverse().find(x=>x.backup)?.backup;
+      prepareUndo();
+      if (backup) state = {...initialState(),...backup,undo:state.undo};
+      else {
+        const last = records[records.length-1].state || {};
+        state.total=num(last.total); state.baseline=num(last.baseline); state.high=num(last.high);
+        state.k=num(last.k)||2.7; state.carryOver=num(last.carry_over);
+        state.logs=records.map(x=>({...x,id:x.id||uid(),display:x.display||x.note||x.action}));
+        state.lastResult=`📦 已从日志恢复核心状态\n\n累计未兑现转入：${fmt(state.total)} ETH\n本轮基准：${fmt(state.baseline)} ETH\n当前 k 值：${state.k}`;
+      }
+      rollDay(); addLog("restore",{amount:0,realized_points:0,consumed_eth:0},"JSONL 导入恢复",`导入 ${records.length} 条记录`);
+      await save(); render(); toast(`已恢复 ${records.length} 条日志`);
+    }
+
+    async function initDay(event) {
+      event.preventDefault();
+      const noRealized=$("initNoRealized").checked, realized=num($("initRealized").value), high=num($("initHigh").value), transfer=num($("initTransfer").value);
+      prepareUndo();
+      if (!noRealized && realized>0 && state.total>0) await addRealized(realized,"","昨日最终兑现",{skipUndo:true});
+      if (high>0) await updateHigh(high,{skipUndo:true});
+      if (transfer>0) await addTransfer(transfer,$("initTime").value,"每日初始化登记",{skipUndo:true});
+      if (!noRealized && !realized && !high && !transfer) return toast("请填写至少一项，或勾选昨日未兑现");
+      if (!state.initializedDates.includes(localDate())) state.initializedDates.push(localDate());
+      addLog("day_init",{amount:round(transfer),realized_points:round(realized),consumed_eth:0},"每日初始化完成",`今日初始化 · 顺延 ${fmt(state.carryOver)} ETH`);
+      await save(); render(); $("initDialog").close(); toast("今日初始化完成");
+    }
+
+    function wire() {
+      document.querySelectorAll(".segmented button").forEach(btn=>btn.addEventListener("click",()=>{
+        document.querySelectorAll(".segmented button").forEach(x=>x.classList.toggle("active",x===btn));
+        document.querySelectorAll(".form-pane").forEach(x=>x.classList.toggle("active",x.id===btn.dataset.pane));
+      }));
+      document.querySelectorAll(".quick").forEach(btn=>btn.addEventListener("click",()=>{$("transferAmount").value=num($("transferAmount").value)+num(btn.dataset.add);}));
+      $("transferPane").addEventListener("submit",async e=>{e.preventDefault();try{await addTransfer($("transferAmount").value,$("transferTime").value,$("transferNote").value);e.target.reset();toast("转入已登记");}catch(err){toast(err.message);}});
+      $("realizedPane").addEventListener("submit",async e=>{e.preventDefault();try{await addRealized($("realizedPoints").value,$("realizedTime").value,$("realizedNote").value);e.target.reset();toast("兑现已登记");}catch(err){toast(err.message);}});
+      $("highPane").addEventListener("submit",async e=>{e.preventDefault();try{await updateHigh($("highPrice").value);e.target.reset();toast("高点已更新");}catch(err){toast(err.message);}});
+      $("settingsForm").addEventListener("submit",async e=>{e.preventDefault();const k=num($("kInput").value),w=num($("avgWindow").value);if(k<=0)return toast("k 值需要大于 0");prepareUndo();const before=state.k;state.k=k;state.avgWindow=w;setResult(`⚙️ 模型设置已更新\n\nk 值：${before} → ${k}\n近期日均周期：最近 ${w} 天\n\n🔻 当前剩余砸盘力度：约 ${fmt(pressurePoints())} 点`);addLog("settings",{amount:0,realized_points:0,consumed_eth:0,k_before:before,k_after:k},"模型参数更新",`k ${before} → ${k}`);await save();render();toast("模型设置已保存");});
+      $("openInit").addEventListener("click",()=>$("initDialog").showModal());
+      $("initLater").addEventListener("click",()=>$("initDialog").close());
+      $("initNoRealized").addEventListener("change",e=>{$("initRealized").disabled=e.target.checked;if(e.target.checked)$("initRealized").value="";});
+      $("initForm").addEventListener("submit",initDay);
+      $("exportBtn").addEventListener("click",exportJSONL);
+      $("importBtn").addEventListener("click",()=>$("importFile").click());
+      $("importFile").addEventListener("change",async e=>{try{if(e.target.files[0])await importJSONL(e.target.files[0]);}catch(err){toast(`导入失败：${err.message}`);}e.target.value="";});
+      $("undoBtn").addEventListener("click",async()=>{if(!state.undo)return;const previous=clone(state.undo);const currentSummary=state.logs.at(-1)?.display||"上一步";previous.undo=null;state=previous;addLog("undo",{amount:0,realized_points:0,consumed_eth:0},"撤销最近操作",`已撤销：${currentSummary}`);await save();render();toast("已撤销上一步");});
+    }
+
+    async function start() {
+      try { await openDB(); const stored=await dbGet(STATE_KEY); if(stored) state={...initialState(),...stored}; }
+      catch { const stored=localStorage.getItem(DB_NAME); if(stored) state={...initialState(),...JSON.parse(stored)}; }
+      rollDay(); wire(); await save(); render();
+      if (!state.initializedDates.includes(localDate())) setTimeout(()=>$("initDialog").showModal(),350);
+    }
+    start();
+  })();
+  </script>
+</body>
+</html>
