@@ -1,0 +1,25 @@
+[Unit]
+Description=ETH Exchange Inflow Collector
+After=network-online.target eth-monitor-api.service
+Wants=network-online.target
+Requires=eth-monitor-api.service
+
+[Service]
+Type=simple
+User=ethmonitor
+Group=ethmonitor
+EnvironmentFile=/etc/eth-monitor-api.env
+Environment=ETH_COLLECTOR_CONFIG=/etc/eth-monitor-collector.json
+Environment=ETH_COLLECTOR_STATE=/var/lib/eth-monitor-api/collector-state.json
+WorkingDirectory=/opt/eth-monitor-api
+ExecStart=/usr/bin/python3 /opt/eth-monitor-api/cloud_collector.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/eth-monitor-api
+
+[Install]
+WantedBy=multi-user.target
