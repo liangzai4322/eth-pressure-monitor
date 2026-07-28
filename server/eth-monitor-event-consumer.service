@@ -1,0 +1,27 @@
+[Unit]
+Description=Consume Existing ETH Monitor Event Log
+After=eth-key-event-monitor.service eth-monitor-api.service
+Wants=eth-key-event-monitor.service
+Requires=eth-monitor-api.service
+
+[Service]
+Type=simple
+User=ethmonitor
+Group=ethmonitor
+EnvironmentFile=/etc/eth-monitor-api.env
+Environment=ETH_SOURCE_EVENT_LOG=/opt/eth-key-event-monitor/events.jsonl
+Environment=ETH_CONSUMER_STATE=/var/lib/eth-monitor-api/event-consumer-state.json
+Environment=ETH_CONSUMER_INTERVAL=5
+WorkingDirectory=/opt/eth-monitor-api
+ExecStart=/usr/bin/python3 /opt/eth-monitor-api/event_log_consumer.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/eth-key-event-monitor
+ReadWritePaths=/var/lib/eth-monitor-api
+
+[Install]
+WantedBy=multi-user.target
