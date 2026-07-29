@@ -413,6 +413,7 @@
             <button class="mini-btn" type="button" id="syncNow">立即从服务器同步</button>
             <div class="setting"><div><label for="deepseekKey">DeepSeek API Key</label><p>仅保存在当前浏览器，不进入日志和 GitHub</p></div><input id="deepseekKey" type="password" autocomplete="off" placeholder="sk-..."></div>
             <div class="setting"><div><label for="deepseekModel">解析模型</label><p>Flash 速度更快，适合短指令抽取</p></div><select id="deepseekModel"><option value="deepseek-v4-flash">V4 Flash</option><option value="deepseek-v4-pro">V4 Pro</option></select></div>
+            <button class="mini-btn" type="button" id="deepseekTest">保存并测试 DeepSeek</button>
             <div class="setting"><div><label for="kInput">当前 k 值</label><p>默认 2.7，用于压力与消耗量换算</p></div><input id="kInput" type="number" min=".1" max="20" step=".1"></div>
             <div class="setting"><div><label for="avgWindow">日均统计周期</label><p>至少有 5 天数据后启用异常预警</p></div><select id="avgWindow"><option value="5">最近 5 天</option><option value="7">最近 7 天</option><option value="10">最近 10 天</option></select></div>
             <button class="submit dark" type="submit">保存模型设置</button>
@@ -494,6 +495,7 @@
     let syncPushTimer = null;
     let localDirty = false;
     let syncBusy = false;
+    let serverDeepSeekConfigured = false;
 
     function openDB() {
       return new Promise((resolve, reject) => {
@@ -582,6 +584,39 @@
           : `复用原监控产出 · 原服务每 60 秒采集 · 最近读取 ${when} · 本次新增日志 ${c.events_seen||0} 条。这里仍可手动补录。`;
         $("collectorNotice").className=`notice ${c.last_error?"warn":"info"}`;
       } catch {}
+    }
+    async function refreshDeepSeekStatus() {
+      if(!syncConfig().token){serverDeepSeekConfigured=false;return false;}
+      try {
+        const {response,data}=await syncRequest("/deepseek");
+        if(!response.ok)throw new Error(data.detail||data.error||`状态检查失败 ${response.status}`);
+        serverDeepSeekConfigured=!!data.configured;
+        $("aiStatus").textContent=serverDeepSeekConfigured?"◆ DEEPSEEK · SERVER":"◇ LOCAL PARSER";
+        $("deepseekKey").placeholder=serverDeepSeekConfigured?"服务器已配置；留空即可":"sk-...";
+        return serverDeepSeekConfigured;
+      } catch {
+        serverDeepSeekConfigured=false;
+        $("aiStatus").textContent="◇ DEEPSEEK OFFLINE";
+        return false;
+      }
+    }
+    async function configureDeepSeekKey(apiKey) {
+      if(!apiKey)return refreshDeepSeekStatus();
+      if(!syncConfig().token) {
+        localStorage.setItem(DEEPSEEK_KEY,apiKey);
+        serverDeepSeekConfigured=false;
+        return true;
+      }
+      const {response,data}=await syncRequest("/deepseek",{
+        method:"PUT",
+        body:JSON.stringify({api_key:apiKey})
+      });
+      if(!response.ok)throw new Error(data.detail||data.error||`DeepSeek Key 校验失败 ${response.status}`);
+      localStorage.removeItem(DEEPSEEK_KEY);
+      $("deepseekKey").value="";
+      serverDeepSeekConfigured=true;
+      await refreshDeepSeekStatus();
+      return true;
     }
     async function syncPush() {
       const cfg=syncConfig();
@@ -751,7 +786,6 @@
     }
     async function parseWithDeepSeek(text) {
       const key=localStorage.getItem(DEEPSEEK_KEY);
-      if(!key) return {...localNaturalParse(text),parser:"本地规则",fallback_reason:"尚未配置 DeepSeek API Key"};
       const cfg=syncConfig();
       if(cfg.token) {
         const {response,data}=await syncRequest("/parse",{
@@ -766,6 +800,7 @@
         if(!response.ok) throw new Error(data.detail||data.error||`智能解析失败 ${response.status}`);
         return {...data.result,parser:"DeepSeek · 服务器"};
       }
+      if(!key) return {...localNaturalParse(text),parser:"本地规则",fallback_reason:"尚未配置 DeepSeek API Key"};
       const response=await fetch("https://api.deepseek.com/chat/completions",{
         method:"POST",
         headers:{"Content-Type":"application/json","Authorization":`Bearer ${key}`},
@@ -987,7 +1022,7 @@
       $("deepseekKey").value=localStorage.getItem(DEEPSEEK_KEY)||"";
       $("syncApiUrl").value=localStorage.getItem(SYNC_API_KEY)||DEFAULT_SYNC_API;
       $("syncToken").value=localStorage.getItem(SYNC_TOKEN_KEY)||"";
-      $("aiStatus").textContent=localStorage.getItem(DEEPSEEK_KEY)?"◆ DEEPSEEK CONNECTED":"◇ LOCAL PARSER";
+      $("aiStatus").textContent=serverDeepSeekConfigured?"◆ DEEPSEEK · SERVER":(localStorage.getItem(DEEPSEEK_KEY)?"◆ DEEPSEEK · BROWSER":"◇ LOCAL PARSER");
       $("undoBtn").disabled = !state.undo;
     }
     function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
@@ -1039,9 +1074,10 @@
       $("transferPane").addEventListener("submit",async e=>{e.preventDefault();try{await addTransfer($("transferAmount").value,$("transferTime").value,$("transferNote").value);e.target.reset();toast("转入已登记");}catch(err){toast(err.message);}});
       $("realizedPane").addEventListener("submit",async e=>{e.preventDefault();try{await addRealized($("realizedPoints").value,$("realizedTime").value,$("realizedNote").value);e.target.reset();toast("兑现已登记");}catch(err){toast(err.message);}});
       $("highPane").addEventListener("submit",async e=>{e.preventDefault();try{await updateHigh($("highPrice").value);e.target.reset();toast("高点已更新");}catch(err){toast(err.message);}});
-      $("settingsForm").addEventListener("submit",async e=>{e.preventDefault();const k=num($("kInput").value),w=num($("avgWindow").value);if(k<=0)return toast("k 值需要大于 0");const oldSyncToken=localStorage.getItem(SYNC_TOKEN_KEY)||"";const syncApi=$("syncApiUrl").value.trim().replace(/\/+$/,"")||DEFAULT_SYNC_API;const syncToken=$("syncToken").value.trim();localStorage.setItem(SYNC_API_KEY,syncApi);if(syncToken)localStorage.setItem(SYNC_TOKEN_KEY,syncToken);else localStorage.removeItem(SYNC_TOKEN_KEY);prepareUndo();const before=state.k;state.k=k;state.avgWindow=w;state.deepseekModel=$("deepseekModel").value;const apiKey=$("deepseekKey").value.trim();if(apiKey)localStorage.setItem(DEEPSEEK_KEY,apiKey);else localStorage.removeItem(DEEPSEEK_KEY);setResult(`⚙️ 模型设置已更新\n\nk 值：${before} → ${k}\n近期日均周期：最近 ${w} 天\n智能解析：${apiKey?state.deepseekModel+" 已连接":"本地规则模式"}\n多端同步：${syncToken?"服务器模式":"仅本机"}\n\n🔻 当前剩余砸盘力度：约 ${fmt(pressurePoints())} 点`);addLog("settings",{amount:0,realized_points:0,consumed_eth:0,k_before:before,k_after:k},"模型参数更新",`k ${before} → ${k}`);await save({sync:false});render();if(syncToken&&syncToken!==oldSyncToken){localDirty=false;await syncPull(false);}else if(syncToken){localDirty=true;await syncPush();}toast("模型设置已保存");});
+      $("settingsForm").addEventListener("submit",async e=>{e.preventDefault();const k=num($("kInput").value),w=num($("avgWindow").value);if(k<=0)return toast("k 值需要大于 0");const oldSyncToken=localStorage.getItem(SYNC_TOKEN_KEY)||"";const syncApi=$("syncApiUrl").value.trim().replace(/\/+$/,"")||DEFAULT_SYNC_API;const syncToken=$("syncToken").value.trim();localStorage.setItem(SYNC_API_KEY,syncApi);if(syncToken)localStorage.setItem(SYNC_TOKEN_KEY,syncToken);else localStorage.removeItem(SYNC_TOKEN_KEY);prepareUndo();const before=state.k;state.k=k;state.avgWindow=w;state.deepseekModel=$("deepseekModel").value;const apiKey=$("deepseekKey").value.trim();try{if(apiKey)await configureDeepSeekKey(apiKey);}catch(err){toast(err.message);return;}setResult(`⚙️ 模型设置已更新\n\nk 值：${before} → ${k}\n近期日均周期：最近 ${w} 天\n智能解析：${serverDeepSeekConfigured||apiKey?state.deepseekModel+" 已连接":"本地规则模式"}\n多端同步：${syncToken?"服务器模式":"仅本机"}\n\n🔻 当前剩余砸盘力度：约 ${fmt(pressurePoints())} 点`);addLog("settings",{amount:0,realized_points:0,consumed_eth:0,k_before:before,k_after:k},"模型参数更新",`k ${before} → ${k}`);await save({sync:false});render();if(syncToken&&syncToken!==oldSyncToken){localDirty=false;await syncPull(false);}else if(syncToken){localDirty=true;await syncPush();}await refreshDeepSeekStatus();toast("模型设置已保存");});
       document.querySelectorAll(".example-chip").forEach(btn=>btn.addEventListener("click",()=>{$("naturalInput").value=btn.dataset.example;$("naturalInput").focus();}));
-      $("parseNatural").addEventListener("click",async()=>{const text=$("naturalInput").value.trim();if(!text)return toast("请先输入一句描述");const btn=$("parseNatural");btn.disabled=true;btn.textContent="正在理解…";try{let raw;try{raw=await parseWithDeepSeek(text);}catch(err){raw={...localNaturalParse(text),parser:"本地规则",fallback_reason:err.message};}renderPlan(normalizePlan(raw));}catch(err){toast(`解析失败：${err.message}`);}finally{btn.disabled=false;btn.textContent="智能解析";}});
+      $("parseNatural").addEventListener("click",async()=>{const text=$("naturalInput").value.trim();if(!text)return toast("请先输入一句描述");const btn=$("parseNatural");btn.disabled=true;btn.textContent="正在理解…";try{let raw;try{raw=await parseWithDeepSeek(text);}catch(err){toast(`DeepSeek 调用失败，已使用本地解析：${err.message}`);raw={...localNaturalParse(text),parser:"本地规则 · 回退",fallback_reason:err.message};}renderPlan(normalizePlan(raw));}catch(err){toast(`解析失败：${err.message}`);}finally{btn.disabled=false;btn.textContent="智能解析";}});
+      $("deepseekTest").addEventListener("click",async()=>{const api=$("syncApiUrl").value.trim().replace(/\/+$/,"")||DEFAULT_SYNC_API,token=$("syncToken").value.trim();localStorage.setItem(SYNC_API_KEY,api);if(token)localStorage.setItem(SYNC_TOKEN_KEY,token);const btn=$("deepseekTest");btn.disabled=true;btn.textContent="正在校验…";try{const key=$("deepseekKey").value.trim();const ok=await configureDeepSeekKey(key);if(!ok)throw new Error("服务器尚未配置 DeepSeek Key");const result=await parseWithDeepSeek("今天高点2300");if(!result?.operations?.some(o=>o.type==="set_high"&&num(o.price)===2300))throw new Error("连接成功，但结构化测试结果异常");toast("DeepSeek 服务器调用与结构化输出测试通过");}catch(err){toast(err.message);}finally{btn.disabled=false;btn.textContent="保存并测试 DeepSeek";}});
       $("confirmOperations").addEventListener("click",executePlan);
       $("cancelOperations").addEventListener("click",()=>{pendingPlan=null;$("parsePreview").classList.add("hidden");});
       $("operationList").addEventListener("input",e=>{const index=Number(e.target.dataset.op),field=e.target.dataset.field;if(!pendingPlan||!Number.isInteger(index)||!field)return;pendingPlan.operations[index][field]=field==="time"||field==="date_ref"?e.target.value:num(e.target.value);if(field==="points"){pendingPlan.operations[index].source_high=null;pendingPlan.operations[index].source_low=null;}});
@@ -1062,7 +1098,7 @@
       catch { const stored=localStorage.getItem(DB_NAME); if(stored) state={...initialState(),...JSON.parse(stored)}; }
       if(!localStorage.getItem(DEVICE_ID_KEY))localStorage.setItem(DEVICE_ID_KEY,uid());
       rollDay(); wire(); await save({sync:false}); render();
-      if(syncConfig().token){localDirty=false;await syncPull(true);}
+      if(syncConfig().token){localDirty=false;await syncPull(true);await refreshDeepSeekStatus();}
       setInterval(()=>{if(document.visibilityState==="visible")syncPull(true);},30000);
       document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")syncPull(true);});
       if (!state.initializedDates.includes(localDate())) setTimeout(()=>$("initDialog").showModal(),350);
