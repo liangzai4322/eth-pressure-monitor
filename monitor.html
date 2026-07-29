@@ -101,6 +101,15 @@
     }
     .ticker b { color: var(--violet); white-space: nowrap; }
     .ticker span { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sync-conflict {
+      margin: -4px 0 16px; padding: 13px 16px; border: 1px solid #e7c779; border-radius: 14px;
+      background: #fff8df; display: flex; gap: 14px; align-items: center; justify-content: space-between;
+      color: #6e5519; font-size: 12px;
+    }
+    .sync-conflict.hidden { display: none; }
+    .sync-conflict-actions { display: flex; gap: 7px; flex-wrap: wrap; flex-shrink: 0; }
+    .sync-conflict button { border: 1px solid #d8bd76; border-radius: 9px; padding: 7px 10px; background: white; color: #614c18; font-weight: 700; }
+    .sync-conflict button.primary { border-color: var(--violet); background: var(--violet); color: white; }
 
     .target-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
     .target {
@@ -301,6 +310,14 @@
     </section>
 
     <div class="ticker"><b id="riskLevel">状态正常</b><span id="riskTicker">录入转入数据后开始测算压力。</span></div>
+    <div class="sync-conflict hidden" id="syncConflictBar" role="status">
+      <span id="syncConflictText">本地与云端记录不一致，请选择要保留的数据。</span>
+      <div class="sync-conflict-actions">
+        <button type="button" id="useCloudState">采用云端</button>
+        <button type="button" class="primary" id="overwriteCloudState">本地覆盖云端</button>
+        <button type="button" id="dismissSyncConflict">稍后处理</button>
+      </div>
+    </div>
 
     <section class="target-grid" aria-label="目标价测算">
       <article class="target"><div class="target-label">保守目标价 · 60% 压力</div><div class="target-value" id="targetSafe">—</div><div class="target-delta" id="deltaSafe">等待录入当日高点</div></article>
@@ -355,8 +372,10 @@
 
           <form class="form-pane" id="realizedPane">
             <div class="form-grid">
-              <div class="field"><label for="realizedPoints">本次已兑现（点）</label><input id="realizedPoints" inputmode="decimal" placeholder="例如：50" required></div>
+              <div class="field"><label for="realizedPoints">本次已兑现（点）</label><input id="realizedPoints" inputmode="decimal" placeholder="可填 50，或由价格区间计算"></div>
               <div class="field"><label for="realizedTime">发生时间（选填）</label><input id="realizedTime" type="time"></div>
+              <div class="field"><label for="realizedFrom">从多少点跌下（选填）</label><input id="realizedFrom" inputmode="decimal" placeholder="例如：2300"></div>
+              <div class="field"><label for="realizedTo">跌到多少点（选填）</label><input id="realizedTo" inputmode="decimal" placeholder="例如：2250"></div>
               <div class="field full"><label for="realizedNote">备注（选填）</label><input id="realizedNote" placeholder="本次兑现说明"></div>
             </div>
             <button class="submit coral" type="submit">登记兑现并扣减压力</button>
@@ -496,6 +515,8 @@
     let localDirty = false;
     let syncBusy = false;
     let serverDeepSeekConfigured = false;
+    let pendingCloudState = null;
+    let pendingCloudRevision = 0;
 
     function openDB() {
       return new Promise((resolve, reject) => {
@@ -539,6 +560,26 @@
       const el=$("syncStatus"); if(!el)return;
       el.textContent=text; el.className=`sync-badge ${tone}`.trim();
     }
+    function comparableState(value) {
+      const copy=clone(value||{});
+      delete copy.undo;
+      delete copy.lastResult;
+      const sortKeys=v=>Array.isArray(v)?v.map(sortKeys):(v&&typeof v==="object"
+        ?Object.keys(v).sort().reduce((o,k)=>(o[k]=sortKeys(v[k]),o),{}):v);
+      return JSON.stringify(sortKeys(copy));
+    }
+    function statesEqual(a,b) { return comparableState(a)===comparableState(b); }
+    function hideSyncConflict() {
+      $("syncConflictBar")?.classList.add("hidden");
+      pendingCloudState=null; pendingCloudRevision=0;
+    }
+    function showSyncConflict(cloudState,revision,reason="云端已有其他设备的新记录") {
+      pendingCloudState={...initialState(),...clone(cloudState),undo:null};
+      pendingCloudRevision=num(revision);
+      $("syncConflictText").textContent=`${reason}（云端 R${pendingCloudRevision}）。本地数据仍保留，可采用云端或用本地覆盖云端。`;
+      $("syncConflictBar").classList.remove("hidden");
+      setSyncStatus("同步待处理","error");
+    }
     async function syncRequest(path,options={}) {
       const cfg=syncConfig();
       if(!cfg.token) throw new Error("请先填写多端同步码");
@@ -557,11 +598,13 @@
         const {response,data}=await syncRequest("/state");
         if(!response.ok) throw new Error(response.status===401?"同步码校验失败":`服务器响应 ${response.status}`);
         if(data.state) {
-          state={...initialState(),...data.state,undo:null};
-          rollDay();
+          if(!statesEqual(state,data.state)) {
+            showSyncConflict(data.state,data.revision,"同步前发现本地与云端数据不一致");
+            if(!silent)toast("发现数据差异，已在页面顶部提示处理");
+            return false;
+          }
           localStorage.setItem(SYNC_REVISION_KEY,String(data.revision||0));
-          await save({sync:false});
-          render();
+          hideSyncConflict();
         }
         setSyncStatus(`云端 R${data.revision||0}`,"online");
         refreshCollectorStatus();
@@ -618,28 +661,38 @@
       await refreshDeepSeekStatus();
       return true;
     }
-    async function syncPush() {
+    async function syncPush(confirmedOverwrite=false,overrideRevision=null) {
       const cfg=syncConfig();
-      if(!cfg.token||syncBusy||!localDirty){if(!cfg.token)setSyncStatus("仅本机");return false;}
+      if(!cfg.token||syncBusy||(!localDirty&&!confirmedOverwrite)){if(!cfg.token)setSyncStatus("仅本机");return false;}
       syncBusy=true; setSyncStatus("上传中","busy");
       try {
-        const baseRevision=num(localStorage.getItem(SYNC_REVISION_KEY));
+        let baseRevision=overrideRevision===null?num(localStorage.getItem(SYNC_REVISION_KEY)):num(overrideRevision);
+        if(!confirmedOverwrite) {
+          const current=await syncRequest("/state");
+          if(!current.response.ok) throw new Error(current.response.status===401?"同步码校验失败":`服务器响应 ${current.response.status}`);
+          if(current.data.state&&statesEqual(state,current.data.state)) {
+            localStorage.setItem(SYNC_REVISION_KEY,String(current.data.revision||0));
+            localDirty=false; hideSyncConflict(); setSyncStatus(`云端 R${current.data.revision||0}`,"online");
+            return true;
+          }
+          const knownRevision=num(localStorage.getItem(SYNC_REVISION_KEY));
+          if(num(current.data.revision)!==knownRevision) {
+            showSyncConflict(current.data.state,current.data.revision,"上传前发现云端版本已经更新");
+            return false;
+          }
+          baseRevision=num(current.data.revision);
+        }
         const {response,data}=await syncRequest("/state",{
           method:"PUT",
           body:JSON.stringify({base_revision:baseRevision,device_id:cfg.device,state:{...clone(state),undo:null}})
         });
         if(response.status===409) {
-          state={...initialState(),...data.state,undo:null};
-          localStorage.setItem(SYNC_REVISION_KEY,String(data.revision||0));
-          localDirty=false;
-          await save({sync:false}); render();
-          setSyncStatus(`云端 R${data.revision||0}`,"online");
-          toast("检测到其他设备的新数据，已采用服务器状态；请重新提交刚才的操作");
+          showSyncConflict(data.state,data.revision,"提交时检测到云端版本冲突");
           return false;
         }
         if(!response.ok) throw new Error(response.status===401?"同步码校验失败":`上传失败 ${response.status}`);
         localStorage.setItem(SYNC_REVISION_KEY,String(data.revision||0));
-        localDirty=false; setSyncStatus(`云端 R${data.revision||0}`,"online");
+        localDirty=false; hideSyncConflict(); setSyncStatus(`云端 R${data.revision||0}`,"online");
         return true;
       } catch(err) {
         setSyncStatus("待重试","error"); toast(err.message); return false;
@@ -865,7 +918,7 @@
     function operationEditor(op,index) {
       const date=`<select data-op="${index}" data-field="date_ref" aria-label="日期"><option value="today" ${op.date_ref==="today"?"selected":""}>今日</option><option value="yesterday" ${op.date_ref==="yesterday"?"selected":""}>昨日</option></select>`;
       if(op.type==="add_transfer") return `${date}<input data-op="${index}" data-field="amount_eth" inputmode="decimal" value="${op.amount_eth??""}" aria-label="转入数量"><span class="op-unit">ETH</span><input data-op="${index}" data-field="time" type="time" value="${op.time||""}" aria-label="时间">`;
-      if(op.type==="realize_points") return `${date}<input data-op="${index}" data-field="points" inputmode="decimal" value="${op.points??""}" aria-label="兑现点数"><span class="op-unit">点</span>`;
+      if(op.type==="realize_points") return `${date}<input data-op="${index}" data-field="source_high" inputmode="decimal" value="${op.source_high??""}" placeholder="起点" aria-label="下跌起点"><span class="op-unit">→</span><input data-op="${index}" data-field="source_low" inputmode="decimal" value="${op.source_low??""}" placeholder="终点" aria-label="下跌终点"><input data-op="${index}" data-field="points" inputmode="decimal" value="${op.points??""}" aria-label="兑现点数"><span class="op-unit">点</span>`;
       if(op.type==="set_high") return `${date}<input data-op="${index}" data-field="price" inputmode="decimal" value="${op.price??""}" aria-label="高点价格"><span class="op-unit">高点</span>`;
       if(op.type==="set_k") return `<input data-op="${index}" data-field="k" inputmode="decimal" value="${op.k??""}" aria-label="k值"><span class="op-unit">k</span>`;
       return date;
@@ -889,7 +942,7 @@
       try {
         for(const op of pendingPlan.operations) {
           const note=`自然语言识别 · ${op.date_ref} · ${op.evidence}`;
-          if(op.type==="realize_points") await addRealized(op.points,op.time||"",note,{skipUndo:true});
+          if(op.type==="realize_points") await addRealized(op.points,op.time||"",note,{skipUndo:true,sourceHigh:op.source_high,sourceLow:op.source_low,dateRef:op.date_ref});
           else if(op.type==="set_high"&&(op.date_ref==="today"||op.date_ref===localDate())) await updateHigh(op.price,{skipUndo:true});
           else if(op.type==="add_transfer") await addTransfer(op.amount_eth,op.time||"",note,{skipUndo:true});
           else if(op.type==="set_k"){state.k=op.k;}
@@ -918,7 +971,10 @@
     }
 
     async function addRealized(points, time="", note="", opts={}) {
-      points = num(points);
+      const sourceHigh=num(opts.sourceHigh), sourceLow=num(opts.sourceLow);
+      if((sourceHigh&&!sourceLow)||(!sourceHigh&&sourceLow)) throw new Error("下跌起点和终点需要一起填写");
+      if(sourceHigh&&sourceLow&&sourceHigh<=sourceLow) throw new Error("下跌起点需要高于终点");
+      points = sourceHigh&&sourceLow ? sourceHigh-sourceLow : num(points);
       if (points <= 0) throw new Error("请输入大于 0 的兑现点数");
       if (state.total <= 0) throw new Error("当前没有可扣减的未兑现转入");
       if (!opts.skipUndo) prepareUndo();
@@ -939,8 +995,9 @@
         if (Math.abs(mean-state.k) > .5) suggestion = `\n\n⚠️ 近期实际 k 值均值为 ${mean.toFixed(1)}，与当前 k 值偏差较大，建议在模型设置中确认更新。`;
       }
       const low = state.high ? Math.min(t.safe,t.risk) : 0, high = state.high ? Math.max(t.safe,t.risk) : 0;
-      setResult(`✅ 本次兑现：${fmt(points)} 点（消耗约 ${fmt(consumed)} ETH）\n\n📊 剩余未兑现转入：${fmt(state.total)} ETH（已释放 ${pct(release)}，本轮基准：${fmt(state.baseline)} ETH）\n\n🔻 剩余砸盘力度：约 ${fmt(remain)} 点\n\n⏳ 压力释放进度：${progressText(release)} ${pct(release)}\n\n🎯 剩余目标价区间：${state.high ? fmt(low)+" ～ "+fmt(high) : "等待录入高点"}${suggestion}`);
-      addLog("realized", {amount:0, realized_points:round(points), consumed_eth:round(consumed), actual_k:Number(actualK.toFixed(3)), realized_time:time}, note, `兑现 ${fmt(points)} 点 · 消耗 ${fmt(consumed)} ETH`);
+      const rangeText=sourceHigh&&sourceLow?`（${fmt(sourceHigh)} → ${fmt(sourceLow)}）`:"";
+      setResult(`✅ 本次兑现：${fmt(points)} 点${rangeText}（消耗约 ${fmt(consumed)} ETH）\n\n📊 剩余未兑现转入：${fmt(state.total)} ETH（已释放 ${pct(release)}，本轮基准：${fmt(state.baseline)} ETH）\n\n🔻 剩余砸盘力度：约 ${fmt(remain)} 点\n\n⏳ 压力释放进度：${progressText(release)} ${pct(release)}\n\n🎯 剩余目标价区间：${state.high ? fmt(low)+" ～ "+fmt(high) : "等待录入高点"}${suggestion}`);
+      addLog("realized", {amount:0, realized_points:round(points), consumed_eth:round(consumed), actual_k:Number(actualK.toFixed(3)), realized_time:time, source_high:sourceHigh||0, source_low:sourceLow||0, realized_date_ref:opts.dateRef||"today"}, note, `兑现 ${fmt(points)} 点${rangeText?` · ${fmt(sourceHigh)} → ${fmt(sourceLow)}`:""} · 消耗 ${fmt(consumed)} ETH`);
       await save(); render();
     }
 
@@ -1072,7 +1129,8 @@
       }));
       document.querySelectorAll(".quick").forEach(btn=>btn.addEventListener("click",()=>{$("transferAmount").value=num($("transferAmount").value)+num(btn.dataset.add);}));
       $("transferPane").addEventListener("submit",async e=>{e.preventDefault();try{await addTransfer($("transferAmount").value,$("transferTime").value,$("transferNote").value);e.target.reset();toast("转入已登记");}catch(err){toast(err.message);}});
-      $("realizedPane").addEventListener("submit",async e=>{e.preventDefault();try{await addRealized($("realizedPoints").value,$("realizedTime").value,$("realizedNote").value);e.target.reset();toast("兑现已登记");}catch(err){toast(err.message);}});
+      $("realizedPane").addEventListener("submit",async e=>{e.preventDefault();try{await addRealized($("realizedPoints").value,$("realizedTime").value,$("realizedNote").value,{sourceHigh:$("realizedFrom").value,sourceLow:$("realizedTo").value});e.target.reset();toast("兑现已登记");}catch(err){toast(err.message);}});
+      ["realizedFrom","realizedTo"].forEach(id=>$(id).addEventListener("input",()=>{const high=num($("realizedFrom").value),low=num($("realizedTo").value);if(high&&low&&high>low)$("realizedPoints").value=round(high-low);}));
       $("highPane").addEventListener("submit",async e=>{e.preventDefault();try{await updateHigh($("highPrice").value);e.target.reset();toast("高点已更新");}catch(err){toast(err.message);}});
       $("settingsForm").addEventListener("submit",async e=>{e.preventDefault();const k=num($("kInput").value),w=num($("avgWindow").value);if(k<=0)return toast("k 值需要大于 0");const oldSyncToken=localStorage.getItem(SYNC_TOKEN_KEY)||"";const syncApi=$("syncApiUrl").value.trim().replace(/\/+$/,"")||DEFAULT_SYNC_API;const syncToken=$("syncToken").value.trim();localStorage.setItem(SYNC_API_KEY,syncApi);if(syncToken)localStorage.setItem(SYNC_TOKEN_KEY,syncToken);else localStorage.removeItem(SYNC_TOKEN_KEY);prepareUndo();const before=state.k;state.k=k;state.avgWindow=w;state.deepseekModel=$("deepseekModel").value;const apiKey=$("deepseekKey").value.trim();try{if(apiKey)await configureDeepSeekKey(apiKey);}catch(err){toast(err.message);return;}setResult(`⚙️ 模型设置已更新\n\nk 值：${before} → ${k}\n近期日均周期：最近 ${w} 天\n智能解析：${serverDeepSeekConfigured||apiKey?state.deepseekModel+" 已连接":"本地规则模式"}\n多端同步：${syncToken?"服务器模式":"仅本机"}\n\n🔻 当前剩余砸盘力度：约 ${fmt(pressurePoints())} 点`);addLog("settings",{amount:0,realized_points:0,consumed_eth:0,k_before:before,k_after:k},"模型参数更新",`k ${before} → ${k}`);await save({sync:false});render();if(syncToken&&syncToken!==oldSyncToken){localDirty=false;await syncPull(false);}else if(syncToken){localDirty=true;await syncPush();}await refreshDeepSeekStatus();toast("模型设置已保存");});
       document.querySelectorAll(".example-chip").forEach(btn=>btn.addEventListener("click",()=>{$("naturalInput").value=btn.dataset.example;$("naturalInput").focus();}));
@@ -1080,9 +1138,12 @@
       $("deepseekTest").addEventListener("click",async()=>{const api=$("syncApiUrl").value.trim().replace(/\/+$/,"")||DEFAULT_SYNC_API,token=$("syncToken").value.trim();localStorage.setItem(SYNC_API_KEY,api);if(token)localStorage.setItem(SYNC_TOKEN_KEY,token);const btn=$("deepseekTest");btn.disabled=true;btn.textContent="正在校验…";try{const key=$("deepseekKey").value.trim();const ok=await configureDeepSeekKey(key);if(!ok)throw new Error("服务器尚未配置 DeepSeek Key");const result=await parseWithDeepSeek("今天高点2300");if(!result?.operations?.some(o=>o.type==="set_high"&&num(o.price)===2300))throw new Error("连接成功，但结构化测试结果异常");toast("DeepSeek 服务器调用与结构化输出测试通过");}catch(err){toast(err.message);}finally{btn.disabled=false;btn.textContent="保存并测试 DeepSeek";}});
       $("confirmOperations").addEventListener("click",executePlan);
       $("cancelOperations").addEventListener("click",()=>{pendingPlan=null;$("parsePreview").classList.add("hidden");});
-      $("operationList").addEventListener("input",e=>{const index=Number(e.target.dataset.op),field=e.target.dataset.field;if(!pendingPlan||!Number.isInteger(index)||!field)return;pendingPlan.operations[index][field]=field==="time"||field==="date_ref"?e.target.value:num(e.target.value);if(field==="points"){pendingPlan.operations[index].source_high=null;pendingPlan.operations[index].source_low=null;}});
+      $("operationList").addEventListener("input",e=>{const index=Number(e.target.dataset.op),field=e.target.dataset.field;if(!pendingPlan||!Number.isInteger(index)||!field)return;const op=pendingPlan.operations[index];op[field]=field==="time"||field==="date_ref"?e.target.value:num(e.target.value);if((field==="source_high"||field==="source_low")&&num(op.source_high)>num(op.source_low)){op.points=num(op.source_high)-num(op.source_low);const pointsInput=$(`input[data-op="${index}"][data-field="points"]`);if(pointsInput)pointsInput.value=round(op.points);}});
       $("operationList").addEventListener("change",e=>e.target.dispatchEvent(new Event("input",{bubbles:true})));
       $("syncNow").addEventListener("click",async()=>{const api=$("syncApiUrl").value.trim().replace(/\/+$/,"")||DEFAULT_SYNC_API,token=$("syncToken").value.trim();localStorage.setItem(SYNC_API_KEY,api);if(token)localStorage.setItem(SYNC_TOKEN_KEY,token);localDirty=false;await syncPull(false);});
+      $("useCloudState").addEventListener("click",async()=>{if(!pendingCloudState)return;state={...initialState(),...clone(pendingCloudState),undo:null};rollDay();localStorage.setItem(SYNC_REVISION_KEY,String(pendingCloudRevision));localDirty=false;hideSyncConflict();await save({sync:false});render();setSyncStatus(`云端 R${localStorage.getItem(SYNC_REVISION_KEY)||0}`,"online");toast("已采用云端数据");});
+      $("overwriteCloudState").addEventListener("click",async()=>{if(!pendingCloudState)return;localDirty=true;const ok=await syncPush(true,pendingCloudRevision);if(ok)toast("本地数据已覆盖到云端");});
+      $("dismissSyncConflict").addEventListener("click",()=>{$("syncConflictBar").classList.add("hidden");setSyncStatus("同步待处理","error");});
       $("openInit").addEventListener("click",()=>$("initDialog").showModal());
       $("initLater").addEventListener("click",()=>$("initDialog").close());
       $("initNoRealized").addEventListener("change",e=>{$("initRealized").disabled=e.target.checked;if(e.target.checked)$("initRealized").value="";});
