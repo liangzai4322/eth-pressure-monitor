@@ -9,7 +9,7 @@ new Function(script);
 
 const instrumented = script.replace(
   /\s*start\(\);\s*\}\)\(\);\s*$/,
-  "\n globalThis.__ethTest={localNaturalParse,normalizePlan};\n})();"
+  "\n globalThis.__ethTest={localNaturalParse,normalizePlan,statesEqual,comparableState};\n})();"
 );
 new Function(instrumented)();
 
@@ -80,6 +80,14 @@ if (!script.includes("source_high:sourceHigh||0") || !script.includes("source_lo
 }
 if (!script.includes("statesEqual(state,current.data.state)") || !script.includes("showSyncConflict")) {
   throw new Error("Local/cloud preflight comparison is missing");
+}
+const syncA = {total: 10, logs: [{id: 1}], undo: {total: 5}, lastResult: "device A"};
+const syncB = {logs: [{id: 1}], total: 10, undo: null, lastResult: "device B"};
+if (!globalThis.__ethTest.statesEqual(syncA, syncB)) {
+  throw new Error("Sync comparison should ignore transient fields and object key order");
+}
+if (globalThis.__ethTest.statesEqual(syncA, {...syncB, total: 11})) {
+  throw new Error("Sync comparison missed a persisted state difference");
 }
 
 console.log(
