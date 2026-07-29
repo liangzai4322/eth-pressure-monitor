@@ -15,6 +15,7 @@
 - `ETH_monitor_log.jsonl` 导出与导入恢复
 - HTTPS 服务器状态同步与乐观锁冲突检测
 - DeepSeek 服务端代理解析
+- DeepSeek Key 服务端验证与一次配置、多端共用
 - AI 识别结果编辑、复核和确认执行
 - 复用服务器既有监控服务的 `events.jsonl` 产出
 - 自动采集事件 ID 幂等去重，同时保留手动补录
