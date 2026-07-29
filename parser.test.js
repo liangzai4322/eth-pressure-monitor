@@ -66,6 +66,21 @@ if (
 const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
 const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
 if (duplicates.length) throw new Error(`Duplicate ids: ${duplicates.join(", ")}`);
+for (const requiredId of [
+  "realizedFrom",
+  "realizedTo",
+  "syncConflictBar",
+  "useCloudState",
+  "overwriteCloudState",
+]) {
+  if (!ids.includes(requiredId)) throw new Error(`Missing UI control: ${requiredId}`);
+}
+if (!script.includes("source_high:sourceHigh||0") || !script.includes("source_low:sourceLow||0")) {
+  throw new Error("Realized price range is not persisted in log detail");
+}
+if (!script.includes("statesEqual(state,current.data.state)") || !script.includes("showSyncConflict")) {
+  throw new Error("Local/cloud preflight comparison is missing");
+}
 
 console.log(
   JSON.stringify(
@@ -76,6 +91,8 @@ console.log(
       deepseekJsonMode: script.includes('response_format:{type:"json_object"}'),
       confirmationGate: script.includes("confirmOperations"),
       editablePreview: script.includes('data-field="price"'),
+      editableRealizedRange: script.includes('data-field="source_high"') && script.includes('data-field="source_low"'),
+      nonModalSyncConflict: html.includes('id="syncConflictBar"') && !html.includes('id="syncConflictBar"><dialog'),
       serverSync: script.includes("syncPush") && script.includes("syncPull"),
     },
     null,
