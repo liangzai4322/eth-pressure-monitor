@@ -16,6 +16,7 @@ ROOT = Path(os.environ.get("ETH_MONITOR_DATA_DIR", "/var/lib/eth-monitor-api"))
 STATE_FILE = ROOT / "state.json"
 LOG_FILE = ROOT / "ETH_monitor_log.jsonl"
 COLLECTOR_STATUS_FILE = ROOT / "collector-status.json"
+DEEPSEEK_KEY_FILE = ROOT / "deepseek.key"
 SYNC_TOKEN = os.environ["ETH_MONITOR_SYNC_TOKEN"]
 DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 ALLOWED_ORIGINS = {
@@ -40,6 +41,44 @@ def atomic_json_write(path, value):
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def atomic_secret_write(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name, dir=str(path.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def get_deepseek_key():
+    if DEEPSEEK_KEY_FILE.exists():
+        return DEEPSEEK_KEY_FILE.read_text(encoding="utf-8").strip()
+    return DEEPSEEK_KEY
+
+
+def validate_deepseek_key(api_key):
+    request = urllib.request.Request(
+        "https://api.deepseek.com/models",
+        method="GET",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": "ETHMonitorAPI/1.1",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return any(
+        item.get("id") in {"deepseek-v4-flash", "deepseek-v4-pro"}
+        for item in payload.get("data", [])
+    )
 
 
 def load_envelope():
@@ -137,6 +176,14 @@ class Handler(BaseHTTPRequestHandler):
                 with COLLECTOR_STATUS_FILE.open("r", encoding="utf-8") as handle:
                     status = json.load(handle)
             return self.json_response(200, {"ok": True, "collector": status})
+        if self.path.rstrip("/") == "/api/deepseek":
+            if not self.authorized():
+                return self.json_response(401, {"ok": False, "error": "unauthorized"})
+            return self.json_response(200, {
+                "ok": True,
+                "configured": bool(get_deepseek_key()),
+                "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+            })
         if self.path.rstrip("/") != "/api/state":
             return self.json_response(404, {"ok": False, "error": "not_found"})
         if not self.authorized():
@@ -146,7 +193,30 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_response(200, {"ok": True, **envelope})
 
     def do_PUT(self):
-        if self.path.rstrip("/") != "/api/state":
+        route = self.path.rstrip("/")
+        if route == "/api/deepseek":
+            if not self.authorized():
+                return self.json_response(401, {"ok": False, "error": "unauthorized"})
+            try:
+                payload = self.body_json()
+                api_key = str(payload.get("api_key", "")).strip()
+                if not api_key.startswith("sk-") or not 20 <= len(api_key) <= 300:
+                    raise ValueError("DeepSeek API Key 格式不正确")
+                if not validate_deepseek_key(api_key):
+                    raise ValueError("DeepSeek API 未返回可用模型")
+                atomic_secret_write(DEEPSEEK_KEY_FILE, api_key)
+                return self.json_response(200, {"ok": True, "configured": True, "validated": True})
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")[:500]
+                return self.json_response(400, {
+                    "ok": False,
+                    "error": "deepseek_key_rejected",
+                    "status": exc.code,
+                    "detail": detail,
+                })
+            except Exception as exc:
+                return self.json_response(400, {"ok": False, "error": "deepseek_config_failed", "detail": str(exc)})
+        if route != "/api/state":
             return self.json_response(404, {"ok": False, "error": "not_found"})
         if not self.authorized():
             return self.json_response(401, {"ok": False, "error": "unauthorized"})
@@ -199,7 +269,7 @@ class Handler(BaseHTTPRequestHandler):
             text = str(payload.get("text", "")).strip()
             system_prompt = str(payload.get("system_prompt", ""))
             model = str(payload.get("model", "deepseek-v4-flash"))
-            api_key = self.headers.get("X-DeepSeek-Key", "") or DEEPSEEK_KEY
+            api_key = self.headers.get("X-DeepSeek-Key", "") or get_deepseek_key()
             if not text or len(text) > 8000:
                 raise ValueError("text length is invalid")
             if model not in {"deepseek-v4-flash", "deepseek-v4-pro"}:
