@@ -101,15 +101,6 @@
     }
     .ticker b { color: var(--violet); white-space: nowrap; }
     .ticker span { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .sync-conflict {
-      margin: -4px 0 16px; padding: 13px 16px; border: 1px solid #e7c779; border-radius: 14px;
-      background: #fff8df; display: flex; gap: 14px; align-items: center; justify-content: space-between;
-      color: #6e5519; font-size: 12px;
-    }
-    .sync-conflict.hidden { display: none; }
-    .sync-conflict-actions { display: flex; gap: 7px; flex-wrap: wrap; flex-shrink: 0; }
-    .sync-conflict button { border: 1px solid #d8bd76; border-radius: 9px; padding: 7px 10px; background: white; color: #614c18; font-weight: 700; }
-    .sync-conflict button.primary { border-color: var(--violet); background: var(--violet); color: white; }
 
     .target-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
     .target {
@@ -310,14 +301,6 @@
     </section>
 
     <div class="ticker"><b id="riskLevel">状态正常</b><span id="riskTicker">录入转入数据后开始测算压力。</span></div>
-    <div class="sync-conflict hidden" id="syncConflictBar" role="status">
-      <span id="syncConflictText">本地与云端记录不一致，请选择要保留的数据。</span>
-      <div class="sync-conflict-actions">
-        <button type="button" id="useCloudState">采用云端</button>
-        <button type="button" class="primary" id="overwriteCloudState">本地覆盖云端</button>
-        <button type="button" id="dismissSyncConflict">稍后处理</button>
-      </div>
-    </div>
 
     <section class="target-grid" aria-label="目标价测算">
       <article class="target"><div class="target-label">保守目标价 · 60% 压力</div><div class="target-value" id="targetSafe">—</div><div class="target-delta" id="deltaSafe">等待录入当日高点</div></article>
@@ -427,9 +410,9 @@
         <article class="panel">
           <div class="panel-head"><div><h3>模型设置</h3><p>修改也会写入日志并保留痕迹</p></div></div>
           <form id="settingsForm" class="settings-grid">
-            <div class="setting"><div><label for="syncApiUrl">同步 API</label><p>服务器统一保存状态和追加日志</p></div><input id="syncApiUrl" inputmode="url" placeholder="https://…/api"></div>
+            <div class="setting"><div><label for="syncApiUrl">同步 API</label><p>本地与云端自动双向合并，按记录去重</p></div><input id="syncApiUrl" inputmode="url" placeholder="https://…/api"></div>
             <div class="setting"><div><label for="syncToken">多端同步码</label><p>各设备填写同一同步码，不进入日志</p></div><input id="syncToken" type="password" autocomplete="off" placeholder="粘贴同步码"></div>
-            <button class="mini-btn" type="button" id="syncNow">立即从服务器同步</button>
+            <button class="mini-btn" type="button" id="syncNow">立即合并本地与云端</button>
             <div class="setting"><div><label for="deepseekKey">DeepSeek API Key</label><p>仅保存在当前浏览器，不进入日志和 GitHub</p></div><input id="deepseekKey" type="password" autocomplete="off" placeholder="sk-..."></div>
             <div class="setting"><div><label for="deepseekModel">解析模型</label><p>Flash 速度更快，适合短指令抽取</p></div><select id="deepseekModel"><option value="deepseek-v4-flash">V4 Flash</option><option value="deepseek-v4-pro">V4 Pro</option></select></div>
             <button class="mini-btn" type="button" id="deepseekTest">保存并测试 DeepSeek</button>
@@ -471,6 +454,7 @@
     const SYNC_API_KEY = "eth-monitor-sync-api";
     const SYNC_TOKEN_KEY = "eth-monitor-sync-token";
     const SYNC_REVISION_KEY = "eth-monitor-sync-revision";
+    const SYNC_BASE_PREFIX = "sync-base-";
     const DEVICE_ID_KEY = "eth-monitor-device-id";
     const DEFAULT_SYNC_API = "https://156.227.237.4.sslip.io/api";
     const $ = (id) => document.getElementById(id);
@@ -515,8 +499,6 @@
     let localDirty = false;
     let syncBusy = false;
     let serverDeepSeekConfigured = false;
-    let pendingCloudState = null;
-    let pendingCloudRevision = 0;
 
     function openDB() {
       return new Promise((resolve, reject) => {
@@ -560,25 +542,111 @@
       const el=$("syncStatus"); if(!el)return;
       el.textContent=text; el.className=`sync-badge ${tone}`.trim();
     }
+    function stableStringify(value) {
+      const sortKeys=v=>Array.isArray(v)?v.map(sortKeys):(v&&typeof v==="object"
+        ?Object.keys(v).sort().reduce((o,k)=>(o[k]=sortKeys(v[k]),o),{}):v);
+      return JSON.stringify(sortKeys(value));
+    }
     function comparableState(value) {
       const copy=clone(value||{});
       delete copy.undo;
       delete copy.lastResult;
-      const sortKeys=v=>Array.isArray(v)?v.map(sortKeys):(v&&typeof v==="object"
-        ?Object.keys(v).sort().reduce((o,k)=>(o[k]=sortKeys(v[k]),o),{}):v);
-      return JSON.stringify(sortKeys(copy));
+      return stableStringify(copy);
     }
     function statesEqual(a,b) { return comparableState(a)===comparableState(b); }
-    function hideSyncConflict() {
-      $("syncConflictBar")?.classList.add("hidden");
-      pendingCloudState=null; pendingCloudRevision=0;
+    function syncBaseKey() {
+      const cfg=syncConfig(), text=`${cfg.api}|${cfg.token}`;
+      let hash=2166136261;
+      for(let i=0;i<text.length;i++){hash^=text.charCodeAt(i);hash=Math.imul(hash,16777619);}
+      return `${SYNC_BASE_PREFIX}${(hash>>>0).toString(16)}`;
     }
-    function showSyncConflict(cloudState,revision,reason="云端已有其他设备的新记录") {
-      pendingCloudState={...initialState(),...clone(cloudState),undo:null};
-      pendingCloudRevision=num(revision);
-      $("syncConflictText").textContent=`${reason}（云端 R${pendingCloudRevision}）。本地数据仍保留，可采用云端或用本地覆盖云端。`;
-      $("syncConflictBar").classList.remove("hidden");
-      setSyncStatus("同步待处理","error");
+    const logFingerprint=log=>stableStringify({time:log?.time||"",action:log?.action||"",detail:log?.detail||{},note:log?.note||"",display:log?.display||""});
+    const logKeys=log=>[log?.id?`id:${log.id}`:null,`fp:${logFingerprint(log)}`].filter(Boolean);
+    function makeLogKeySet(logs=[]) { const set=new Set();logs.forEach(log=>logKeys(log).forEach(key=>set.add(key)));return set; }
+    function logSetHas(set,log) { return logKeys(log).some(key=>set.has(key)); }
+    function uniqueLogs(source=[],against=[]) { const keys=makeLogKeySet(against);return source.filter(log=>!logSetHas(keys,log)); }
+    function unionLogs(local=[],cloud=[]) {
+      const result=[], keys=new Set();
+      [...local,...cloud].forEach(log=>{if(logSetHas(keys,log))return;result.push(clone(log));logKeys(log).forEach(key=>keys.add(key));});
+      return result.sort((a,b)=>String(a.time||"").localeCompare(String(b.time||""))||String(a.id||"").localeCompare(String(b.id||""))).slice(-1000);
+    }
+    function unionValues(...lists) {
+      const map=new Map();
+      lists.flat().forEach(value=>{const key=stableStringify(value);if(!map.has(key))map.set(key,clone(value));});
+      return [...map.values()];
+    }
+    function effectDate(log) {
+      const logDate=String(log?.time||"").slice(0,10)||localDate();
+      if(log?.detail?.realized_date_ref==="yesterday"){const d=new Date(`${logDate}T12:00:00`);d.setDate(d.getDate()-1);return localDate(d);}
+      const ref=log?.detail?.realized_date_ref;
+      return /^\d{4}-\d{2}-\d{2}$/.test(ref||"")?ref:logDate;
+    }
+    function logEffects(logs=[]) {
+      const out={total:0,baseline:0,carryOver:0,totalRealized:0,daily:{}};
+      logs.forEach(log=>{
+        const d=log?.detail||{}, date=effectDate(log), day=out.daily[date]||(out.daily[date]={newTransfers:0,realizedPoints:0});
+        if(log.action==="transfer"||log.action==="auto_transfer") {const amount=num(d.amount);out.total+=amount;out.baseline+=amount;day.newTransfers+=amount;}
+        if(log.action==="realized") {const consumed=num(d.consumed_eth),points=num(d.realized_points);out.total-=consumed;out.carryOver-=consumed;out.totalRealized+=points;day.realizedPoints+=points;}
+      });
+      return out;
+    }
+    function mergeNumber(base,local,cloud,duplicateEffect=0) {
+      base=num(base);local=num(local);cloud=num(cloud);
+      if(local===base)return cloud;
+      if(cloud===base)return local;
+      return base+(local-base)+(cloud-base)-duplicateEffect;
+    }
+    function mergeScalar(base,local,cloud) {
+      if(stableStringify(local)===stableStringify(cloud))return clone(local);
+      if(stableStringify(local)===stableStringify(base))return clone(cloud);
+      return clone(local);
+    }
+    function inferBase(local,cloud) {
+      const localOnly=uniqueLogs(local.logs,cloud.logs), effects=logEffects(localOnly), base=clone(local);
+      base.total=num(local.total)-effects.total;
+      base.baseline=num(local.baseline)-effects.baseline;
+      base.carryOver=Math.max(0,num(local.carryOver)-effects.carryOver);
+      base.totalRealized=num(local.totalRealized)-effects.totalRealized;
+      base.logs=(local.logs||[]).filter(log=>!localOnly.includes(log));
+      Object.entries(effects.daily).forEach(([date,effect])=>{if(!base.daily?.[date])return;base.daily[date].newTransfers=num(base.daily[date].newTransfers)-effect.newTransfers;base.daily[date].realizedPoints=num(base.daily[date].realizedPoints)-effect.realizedPoints;});
+      return base;
+    }
+    function mergeStates(localValue,cloudValue,baseValue=null) {
+      const local={...initialState(),...clone(localValue||{})}, cloud={...initialState(),...clone(cloudValue||{})};
+      if(statesEqual(local,cloud))return {...local,undo:null};
+      const base={...initialState(),...clone(baseValue||inferBase(local,cloud))};
+      const baseKeys=makeLogKeySet(base.logs), localAdded=(local.logs||[]).filter(x=>!logSetHas(baseKeys,x)), cloudAdded=(cloud.logs||[]).filter(x=>!logSetHas(baseKeys,x));
+      const cloudAddedKeys=makeLogKeySet(cloudAdded), duplicateAdded=localAdded.filter(x=>logSetHas(cloudAddedKeys,x)), duplicateEffects=logEffects(duplicateAdded);
+      const result={...initialState(),...clone(cloud),...clone(local),undo:null};
+      result.total=Math.max(0,mergeNumber(base.total,local.total,cloud.total,duplicateEffects.total));
+      result.baseline=Math.max(0,mergeNumber(base.baseline,local.baseline,cloud.baseline,duplicateEffects.baseline));
+      result.carryOver=Math.max(0,mergeNumber(base.carryOver,local.carryOver,cloud.carryOver,duplicateEffects.carryOver));
+      result.totalRealized=Math.max(0,mergeNumber(base.totalRealized,local.totalRealized,cloud.totalRealized,duplicateEffects.totalRealized));
+      result.high=local.lastActiveDate===cloud.lastActiveDate?Math.max(num(local.high),num(cloud.high))
+        :(String(local.lastActiveDate)>String(cloud.lastActiveDate)?num(local.high):num(cloud.high));
+      result.k=mergeScalar(base.k,local.k,cloud.k);
+      result.avgWindow=mergeScalar(base.avgWindow,local.avgWindow,cloud.avgWindow);
+      result.deepseekModel=mergeScalar(base.deepseekModel,local.deepseekModel,cloud.deepseekModel);
+      result.lastActiveDate=[local.lastActiveDate,cloud.lastActiveDate].filter(Boolean).sort().at(-1)||localDate();
+      result.initializedDates=unionValues(local.initializedDates||[],cloud.initializedDates||[]).sort();
+      result.kSamples=unionValues(local.kSamples||[],cloud.kSamples||[]);
+      result.collectorSeen=unionValues(local.collectorSeen||[],cloud.collectorSeen||[]).slice(-5000);
+      result.logs=unionLogs(local.logs||[],cloud.logs||[]);
+      result.daily={};
+      const dates=new Set([...Object.keys(base.daily||{}),...Object.keys(local.daily||{}),...Object.keys(cloud.daily||{})]);
+      dates.forEach(date=>{
+        const b=base.daily?.[date]||{},l=local.daily?.[date]||{},c=cloud.daily?.[date]||{},dup=duplicateEffects.daily[date]||{};
+        result.daily[date]={
+          ...clone(c),...clone(l),
+          newTransfers:Math.max(0,mergeNumber(b.newTransfers,l.newTransfers,c.newTransfers,dup.newTransfers)),
+          realizedPoints:Math.max(0,mergeNumber(b.realizedPoints,l.realizedPoints,c.realizedPoints,dup.realizedPoints)),
+          high:Math.max(num(l.high),num(c.high)),openingCarry:Math.max(num(l.openingCarry),num(c.openingCarry)),
+          transfers:unionValues(l.transfers||[],c.transfers||[]),touched:!!(l.touched||c.touched)
+        };
+      });
+      const localLatest=String(local.logs?.at(-1)?.time||""),cloudLatest=String(cloud.logs?.at(-1)?.time||"");
+      result.lastResult=cloudLatest>localLatest?cloud.lastResult:local.lastResult;
+      return result;
     }
     async function syncRequest(path,options={}) {
       const cfg=syncConfig();
@@ -590,32 +658,51 @@
       const data=await response.json().catch(()=>({}));
       return {response,data};
     }
-    async function syncPull(silent=false) {
+    async function syncMerge(silent=false) {
       const cfg=syncConfig();
-      if(!cfg.token||syncBusy||localDirty) return false;
+      if(!cfg.token||syncBusy){if(!cfg.token)setSyncStatus("仅本机");return false;}
       syncBusy=true; setSyncStatus("同步中","busy");
       try {
-        const {response,data}=await syncRequest("/state");
-        if(!response.ok) throw new Error(response.status===401?"同步码校验失败":`服务器响应 ${response.status}`);
-        if(data.state) {
-          if(!statesEqual(state,data.state)) {
-            showSyncConflict(data.state,data.revision,"同步前发现本地与云端数据不一致");
-            if(!silent)toast("发现数据差异，已在页面顶部提示处理");
-            return false;
+        let base=null;
+        try{base=await dbGet(syncBaseKey());}catch{}
+        const originalLocal=clone(state);
+        for(let attempt=0;attempt<3;attempt++) {
+          const current=await syncRequest("/state");
+          if(!current.response.ok)throw new Error(current.response.status===401?"同步码校验失败":`服务器响应 ${current.response.status}`);
+          const cloud={...initialState(),...clone(current.data.state||{}),undo:null};
+          const localOnly=uniqueLogs(originalLocal.logs||[],cloud.logs||[]).length;
+          const cloudOnly=uniqueLogs(cloud.logs||[],originalLocal.logs||[]).length;
+          const merged=mergeStates(originalLocal,cloud,base);
+          let revision=num(current.data.revision),synced=cloud;
+          if(!statesEqual(merged,cloud)) {
+            const put=await syncRequest("/state",{method:"PUT",body:JSON.stringify({base_revision:revision,device_id:cfg.device,state:{...clone(merged),undo:null}})});
+            if(put.response.status===409)continue;
+            if(!put.response.ok)throw new Error(put.response.status===401?"同步码校验失败":`上传失败 ${put.response.status}`);
+            revision=num(put.data.revision);synced=merged;
           }
-          localStorage.setItem(SYNC_REVISION_KEY,String(data.revision||0));
-          hideSyncConflict();
+          state={...initialState(),...clone(synced),undo:null};
+          rollDay();
+          await save({sync:false});
+          try{await dbSet(syncBaseKey(),{...clone(state),undo:null});}catch{}
+          localStorage.setItem(SYNC_REVISION_KEY,String(revision));
+          localDirty=false;render();setSyncStatus(`合并完成 R${revision}`,"online");
+          refreshCollectorStatus();
+          if(!silent) {
+            if(localOnly&&cloudOnly)toast(`已自动合并：本地新增 ${localOnly} 条 + 云端新增 ${cloudOnly} 条`);
+            else if(localOnly)toast(`已将本地新增 ${localOnly} 条同步到云端`);
+            else if(cloudOnly)toast(`已将云端新增 ${cloudOnly} 条同步到本地`);
+            else toast("本地与云端数据已一致");
+          }
+          return true;
         }
-        setSyncStatus(`云端 R${data.revision||0}`,"online");
-        refreshCollectorStatus();
-        if(!silent)toast("已同步服务器最新状态");
-        return true;
+        throw new Error("云端连续更新，稍后将自动继续合并");
       } catch(err) {
         setSyncStatus("同步异常","error");
         if(!silent)toast(err.message);
         return false;
       } finally { syncBusy=false; }
     }
+    async function syncPull(silent=false) { return syncMerge(silent); }
     async function refreshCollectorStatus() {
       if(!syncConfig().token)return;
       try {
@@ -661,43 +748,7 @@
       await refreshDeepSeekStatus();
       return true;
     }
-    async function syncPush(confirmedOverwrite=false,overrideRevision=null) {
-      const cfg=syncConfig();
-      if(!cfg.token||syncBusy||(!localDirty&&!confirmedOverwrite)){if(!cfg.token)setSyncStatus("仅本机");return false;}
-      syncBusy=true; setSyncStatus("上传中","busy");
-      try {
-        let baseRevision=overrideRevision===null?num(localStorage.getItem(SYNC_REVISION_KEY)):num(overrideRevision);
-        if(!confirmedOverwrite) {
-          const current=await syncRequest("/state");
-          if(!current.response.ok) throw new Error(current.response.status===401?"同步码校验失败":`服务器响应 ${current.response.status}`);
-          if(current.data.state&&statesEqual(state,current.data.state)) {
-            localStorage.setItem(SYNC_REVISION_KEY,String(current.data.revision||0));
-            localDirty=false; hideSyncConflict(); setSyncStatus(`云端 R${current.data.revision||0}`,"online");
-            return true;
-          }
-          const knownRevision=num(localStorage.getItem(SYNC_REVISION_KEY));
-          if(num(current.data.revision)!==knownRevision) {
-            showSyncConflict(current.data.state,current.data.revision,"上传前发现云端版本已经更新");
-            return false;
-          }
-          baseRevision=num(current.data.revision);
-        }
-        const {response,data}=await syncRequest("/state",{
-          method:"PUT",
-          body:JSON.stringify({base_revision:baseRevision,device_id:cfg.device,state:{...clone(state),undo:null}})
-        });
-        if(response.status===409) {
-          showSyncConflict(data.state,data.revision,"提交时检测到云端版本冲突");
-          return false;
-        }
-        if(!response.ok) throw new Error(response.status===401?"同步码校验失败":`上传失败 ${response.status}`);
-        localStorage.setItem(SYNC_REVISION_KEY,String(data.revision||0));
-        localDirty=false; hideSyncConflict(); setSyncStatus(`云端 R${data.revision||0}`,"online");
-        return true;
-      } catch(err) {
-        setSyncStatus("待重试","error"); toast(err.message); return false;
-      } finally { syncBusy=false; }
-    }
+    async function syncPush() { return syncMerge(true); }
     function ensureDaily(date = localDate()) {
       if (!state.daily[date]) state.daily[date] = { newTransfers:0, realizedPoints:0, high:0, openingCarry:state.total, transfers:[], touched:true };
       return state.daily[date];
@@ -1140,10 +1191,7 @@
       $("cancelOperations").addEventListener("click",()=>{pendingPlan=null;$("parsePreview").classList.add("hidden");});
       $("operationList").addEventListener("input",e=>{const index=Number(e.target.dataset.op),field=e.target.dataset.field;if(!pendingPlan||!Number.isInteger(index)||!field)return;const op=pendingPlan.operations[index];op[field]=field==="time"||field==="date_ref"?e.target.value:num(e.target.value);if((field==="source_high"||field==="source_low")&&num(op.source_high)>num(op.source_low)){op.points=num(op.source_high)-num(op.source_low);const pointsInput=$(`input[data-op="${index}"][data-field="points"]`);if(pointsInput)pointsInput.value=round(op.points);}});
       $("operationList").addEventListener("change",e=>e.target.dispatchEvent(new Event("input",{bubbles:true})));
-      $("syncNow").addEventListener("click",async()=>{const api=$("syncApiUrl").value.trim().replace(/\/+$/,"")||DEFAULT_SYNC_API,token=$("syncToken").value.trim();localStorage.setItem(SYNC_API_KEY,api);if(token)localStorage.setItem(SYNC_TOKEN_KEY,token);localDirty=false;await syncPull(false);});
-      $("useCloudState").addEventListener("click",async()=>{if(!pendingCloudState)return;state={...initialState(),...clone(pendingCloudState),undo:null};rollDay();localStorage.setItem(SYNC_REVISION_KEY,String(pendingCloudRevision));localDirty=false;hideSyncConflict();await save({sync:false});render();setSyncStatus(`云端 R${localStorage.getItem(SYNC_REVISION_KEY)||0}`,"online");toast("已采用云端数据");});
-      $("overwriteCloudState").addEventListener("click",async()=>{if(!pendingCloudState)return;localDirty=true;const ok=await syncPush(true,pendingCloudRevision);if(ok)toast("本地数据已覆盖到云端");});
-      $("dismissSyncConflict").addEventListener("click",()=>{$("syncConflictBar").classList.add("hidden");setSyncStatus("同步待处理","error");});
+      $("syncNow").addEventListener("click",async()=>{const api=$("syncApiUrl").value.trim().replace(/\/+$/,"")||DEFAULT_SYNC_API,token=$("syncToken").value.trim();localStorage.setItem(SYNC_API_KEY,api);if(token)localStorage.setItem(SYNC_TOKEN_KEY,token);await syncPull(false);});
       $("openInit").addEventListener("click",()=>$("initDialog").showModal());
       $("initLater").addEventListener("click",()=>$("initDialog").close());
       $("initNoRealized").addEventListener("change",e=>{$("initRealized").disabled=e.target.checked;if(e.target.checked)$("initRealized").value="";});
