@@ -76,6 +76,9 @@ for (const requiredId of [
 if (!script.includes("source_high:sourceHigh||0") || !script.includes("source_low:sourceLow||0")) {
   throw new Error("Realized price range is not persisted in log detail");
 }
+if (!html.includes('src="assets/eth-monitor-logo.png"') || !html.includes('rel="icon"')) {
+  throw new Error("Website logo integration is missing");
+}
 if (!script.includes("mergeStates(originalLocal,cloud,base)") || !script.includes("syncBaseKey()")) {
   throw new Error("Local/cloud three-way merge is missing");
 }
