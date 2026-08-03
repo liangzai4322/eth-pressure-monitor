@@ -9,7 +9,7 @@ new Function(script);
 
 const instrumented = script.replace(
   /\s*start\(\);\s*\}\)\(\);\s*$/,
-  "\n globalThis.__ethTest={localNaturalParse,normalizePlan,statesEqual,comparableState};\n})();"
+  "\n globalThis.__ethTest={localNaturalParse,normalizePlan,statesEqual,comparableState,mergeStates,uniqueLogs};\n})();"
 );
 new Function(instrumented)();
 
@@ -69,17 +69,15 @@ if (duplicates.length) throw new Error(`Duplicate ids: ${duplicates.join(", ")}`
 for (const requiredId of [
   "realizedFrom",
   "realizedTo",
-  "syncConflictBar",
-  "useCloudState",
-  "overwriteCloudState",
+  "syncNow",
 ]) {
   if (!ids.includes(requiredId)) throw new Error(`Missing UI control: ${requiredId}`);
 }
 if (!script.includes("source_high:sourceHigh||0") || !script.includes("source_low:sourceLow||0")) {
   throw new Error("Realized price range is not persisted in log detail");
 }
-if (!script.includes("statesEqual(state,current.data.state)") || !script.includes("showSyncConflict")) {
-  throw new Error("Local/cloud preflight comparison is missing");
+if (!script.includes("mergeStates(originalLocal,cloud,base)") || !script.includes("syncBaseKey()")) {
+  throw new Error("Local/cloud three-way merge is missing");
 }
 const syncA = {total: 10, logs: [{id: 1}], undo: {total: 5}, lastResult: "device A"};
 const syncB = {logs: [{id: 1}], total: 10, undo: null, lastResult: "device B"};
@@ -88,6 +86,44 @@ if (!globalThis.__ethTest.statesEqual(syncA, syncB)) {
 }
 if (globalThis.__ethTest.statesEqual(syncA, {...syncB, total: 11})) {
   throw new Error("Sync comparison missed a persisted state difference");
+}
+
+const date = "2026-08-03";
+const baseLog = {id:"base",time:`${date} 10:00`,action:"transfer",detail:{amount:10000,realized_points:0,consumed_eth:0},note:"",display:"转入 10,000 ETH"};
+const localLog = {id:"local",time:`${date} 11:00`,action:"transfer",detail:{amount:5000,realized_points:0,consumed_eth:0},note:"",display:"转入 5,000 ETH"};
+const cloudLog = {id:"cloud",time:`${date} 12:00`,action:"realized",detail:{amount:0,realized_points:3,consumed_eth:1000,realized_date_ref:"today"},note:"",display:"兑现 3 点"};
+const transfer = (amount, recordedAt) => ({amount,time:"",recordedAt,note:""});
+const baseState = {total:10000,baseline:10000,carryOver:10000,totalRealized:0,logs:[baseLog],daily:{[date]:{newTransfers:10000,realizedPoints:0,high:0,openingCarry:0,transfers:[transfer(10000,`${date} 10:00`)],touched:true}}};
+const localState = {...baseState,total:15000,baseline:15000,logs:[baseLog,localLog],daily:{[date]:{...baseState.daily[date],newTransfers:15000,transfers:[...baseState.daily[date].transfers,transfer(5000,`${date} 11:00`)]}}};
+const cloudState = {...baseState,total:9000,totalRealized:3,carryOver:9000,logs:[baseLog,cloudLog],daily:{[date]:{...baseState.daily[date],realizedPoints:3}}};
+const merged = globalThis.__ethTest.mergeStates(localState, cloudState, baseState);
+if (merged.total !== 14000 || merged.baseline !== 15000 || merged.totalRealized !== 3 || merged.logs.length !== 3) {
+  throw new Error(`Bidirectional merge regression: ${JSON.stringify({total:merged.total,baseline:merged.baseline,totalRealized:merged.totalRealized,logs:merged.logs.length})}`);
+}
+if (merged.daily[date].newTransfers !== 15000 || merged.daily[date].realizedPoints !== 3) {
+  throw new Error("Daily aggregate merge regression");
+}
+const legacyMerged = globalThis.__ethTest.mergeStates(localState,cloudState);
+if (legacyMerged.total !== 14000 || legacyMerged.logs.length !== 3) {
+  throw new Error("First merge without a stored sync baseline regression");
+}
+const duplicateCloudLog = {...localLog,id:"same-event-other-device"};
+const duplicateCloudState = {...localState,logs:[baseLog,duplicateCloudLog]};
+const deduped = globalThis.__ethTest.mergeStates(localState,duplicateCloudState,baseState);
+if (deduped.total !== 15000 || deduped.logs.length !== 2) {
+  throw new Error("Cross-device content fingerprint deduplication regression");
+}
+const otherDeviceLog = {...localLog,id:"different-transfer",time:`${date} 11:05`,note:"第二台设备的另一笔"};
+const equalDeltaCloud = {...localState,logs:[baseLog,otherDeviceLog],daily:{[date]:{...localState.daily[date],transfers:[...baseState.daily[date].transfers,transfer(5000,`${date} 11:05`)]}}};
+const combinedEqualDeltas = globalThis.__ethTest.mergeStates(localState,equalDeltaCloud,baseState);
+if (combinedEqualDeltas.total !== 20000 || combinedEqualDeltas.daily[date].newTransfers !== 20000 || combinedEqualDeltas.logs.length !== 3) {
+  throw new Error("Equal-sized but distinct concurrent additions were not combined");
+}
+const rolledLocal = {...baseState,lastActiveDate:"2026-08-04",high:0,carryOver:10000};
+const oldCloud = {...baseState,lastActiveDate:"2026-08-03",high:2400};
+const rolled = globalThis.__ethTest.mergeStates(rolledLocal,oldCloud,baseState);
+if (rolled.lastActiveDate !== "2026-08-04" || rolled.high !== 0) {
+  throw new Error("Natural-day rollover merge regression");
 }
 
 console.log(
@@ -100,7 +136,8 @@ console.log(
       confirmationGate: script.includes("confirmOperations"),
       editablePreview: script.includes('data-field="price"'),
       editableRealizedRange: script.includes('data-field="source_high"') && script.includes('data-field="source_low"'),
-      nonModalSyncConflict: html.includes('id="syncConflictBar"') && !html.includes('id="syncConflictBar"><dialog'),
+      automaticBidirectionalMerge: script.includes("mergeStates") && script.includes("unionLogs"),
+      contentFingerprintDeduplication: true,
       serverSync: script.includes("syncPush") && script.includes("syncPull"),
     },
     null,
