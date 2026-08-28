@@ -1,6 +1,12 @@
 const fs = require("fs");
 
-const html = fs.readFileSync("monitor.html", "utf8");
+const html = fs.readFileSync("index.html", "utf8");
+if (!html.includes('const DEFAULT_SYNC_API = "https://liangzai666.com/pressure";')) {
+  throw new Error("Fixed production API regression");
+}
+if (html.includes("syncApiUrl") || html.includes("SYNC_API_KEY")) {
+  throw new Error("API URL must not be editable or overridden from localStorage");
+}
 const match = html.match(/<script>([\s\S]*?)<\/script>/);
 if (!match) throw new Error("Inline application script not found");
 
