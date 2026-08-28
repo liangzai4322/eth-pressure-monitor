@@ -2,16 +2,25 @@ import json
 import os
 import shlex
 
-import paramiko
 
+ROTATION_CONFIRMATION = "I_UNDERSTAND_THIS_ROTATES_SYNC_TOKEN"
+NEW_TOKEN = os.environ.get("ETH_MONITOR_SYNC_TOKEN_OVERRIDE", "").strip()
+ACK = os.environ.get("ETH_MONITOR_ALLOW_TOKEN_ROTATION", "").strip()
+
+if not NEW_TOKEN:
+    raise SystemExit("ETH_MONITOR_SYNC_TOKEN_OVERRIDE is empty")
+if ACK != ROTATION_CONFIRMATION:
+    raise SystemExit(
+        "sync token rotation is locked; set ETH_MONITOR_ALLOW_TOKEN_ROTATION="
+        + ROTATION_CONFIRMATION
+        + " only after the user explicitly requests rotation in the current task"
+    )
 
 HOST = os.environ["ETH_MONITOR_SERVER_HOST"]
 USER = os.environ["ETH_MONITOR_SERVER_USER"]
 PASSWORD = os.environ["ETH_MONITOR_SERVER_PASSWORD"]
-NEW_TOKEN = os.environ["ETH_MONITOR_SYNC_TOKEN_OVERRIDE"].strip()
 
-if not NEW_TOKEN:
-    raise SystemExit("ETH_MONITOR_SYNC_TOKEN_OVERRIDE is empty")
+import paramiko
 
 
 def quote(value):

@@ -46,4 +46,6 @@ API 代码位于 `server/api_server.py`，提供：
 
 状态写入采用递增 revision。客户端先以最近一次同步状态作为基线执行三方合并，再提交最新 revision；遇到 `409` 会重新读取云端并再次合并。API Key、同步码和密码不写入 JSONL。
 
+生产同步码保存在服务器私有文件 `/etc/eth-monitor-api.env`，普通部署、发布、排障和服务重启均必须原样保留。`server/update_sync_token.py` 默认锁定，只有用户在当次任务明确要求轮换并设置专用确认变量后才会执行；同步码明文不得进入公开仓库。
+
 `eth-monitor-event-consumer.service` 只尾读既有 `/opt/eth-key-event-monitor/events.jsonl`，自身不请求上游接口。首次启动以当前文件末尾建立基线，后续新增的真实 ETH 交易所转入会调用 `/api/inflow` 自动累计；`ACC-` 聚合提醒记录会排除，同一事件 ID 再次出现时按重复事件忽略。手动补录入口保持可用。

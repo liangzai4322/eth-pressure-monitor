@@ -1,6 +1,6 @@
 const fs = require("fs");
 
-const html = fs.readFileSync("index.html", "utf8");
+const html = fs.readFileSync("monitor.html", "utf8");
 const match = html.match(/<script>([\s\S]*?)<\/script>/);
 if (!match) throw new Error("Inline application script not found");
 
